@@ -1,0 +1,169 @@
+// Ichimoku + RSI Baseline Strategy
+// Clean slate - Ichimoku Cloud with RSI confirmation
+// For ES/NQ 5m charts
+//@version=5
+strategy("Ichimoku RSI v1", shorttitle="ICHI-RSI", overlay=true,
+         pyramiding=0, initial_capital=10000, currency=currency.USD,
+         default_qty_type=strategy.fixed, default_qty_value=1,
+         commission_type=strategy.commission.cash_per_contract, commission_value=2.50,
+         slippage=1)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// INPUTS
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Ichimoku Settings (standard)
+tenkanLen = input.int(9, "Tenkan (Conversion)", group="Ichimoku")
+kijunLen = input.int(26, "Kijun (Base)", group="Ichimoku")
+senkouBLen = input.int(52, "Senkou B", group="Ichimoku")
+displacement = input.int(26, "Displacement", group="Ichimoku")
+
+// RSI
+rsiLen = input.int(14, "RSI Length", group="RSI")
+rsiOB = input.int(70, "RSI Overbought", group="RSI")
+rsiOS = input.int(30, "RSI Oversold", group="RSI")
+
+// Risk
+slTicks = input.float(10, "Stop Loss Ticks", group="Risk")
+tpTicks = input.float(20, "Take Profit Ticks", group="Risk")
+
+// Session
+useSession = input.bool(true, "Use Session Filter", group="Session")
+sessStart = input.int(940, "Start", group="Session")
+sessEnd = input.int(1545, "End", group="Session")
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ICHIMOKU CALCULATIONS
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Tenkan-sen (Conversion Line): 9-period high+low / 2
+tenkan = (ta.highest(high, tenkanLen) + ta.lowest(low, tenkanLen)) / 2
+
+// Kijun-sen (Base Line): 26-period high+low / 2
+kijun = (ta.highest(high, kijunLen) + ta.lowest(low, kijunLen)) / 2
+
+// Senkou Span A (Leading Span A): Tenkan+Kijun / 2, displaced 26 periods ahead
+senkouA = (tenkan + kijun) / 2
+
+// Senkou Span B (Leading Span B): 52-period high+low / 2, displaced 26 periods ahead
+senkouB = (ta.highest(high, senkouBLen) + ta.lowest(low, senkouBLen)) / 2
+
+// For current cloud (not displaced for signal generation)
+cloudTop = math.max(senkouA, senkouB)
+cloudBottom = math.min(senkouA, senkouB)
+
+// Cloud color
+cloudBullish = senkouA > senkouB
+cloudBearish = senkouA < senkouB
+
+// ══════════════════════════════════════════════════════════════════════════════
+// RSI
+// ══════════════════════════════════════════════════════════════════════════════
+
+rsi = ta.rsi(close, rsiLen)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SESSION
+// ══════════════════════════════════════════════════════════════════════════════
+
+timeNow = hour * 100 + minute
+inSession = not useSession or (timeNow >= sessStart and timeNow < sessEnd)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ENTRY SIGNALS
+// ══════════════════════════════════════════════════════════════════════════════
+
+// === LONG CONDITIONS ===
+// 1. TK Cross: Tenkan crosses above Kijun (bullish momentum)
+// 2. Price above Cloud (bullish trend)
+// 3. RSI > 50 (momentum confirmation)
+// 4. RSI not overbought (< 70)
+
+tkCrossUp = ta.crossover(tenkan, kijun)
+priceAboveCloud = close > cloudTop
+rsiBullish = rsi > 50 and rsi < rsiOB
+
+longSignal = tkCrossUp and priceAboveCloud and rsiBullish and inSession and strategy.position_size == 0
+
+// === SHORT CONDITIONS ===
+// 1. TK Cross: Tenkan crosses below Kijun (bearish momentum)
+// 2. Price below Cloud (bearish trend)
+// 3. RSI < 50 (momentum confirmation)
+// 4. RSI not oversold (> 30)
+
+tkCrossDown = ta.crossunder(tenkan, kijun)
+priceBelowCloud = close < cloudBottom
+rsiBearish = rsi < 50 and rsi > rsiOS
+
+shortSignal = tkCrossDown and priceBelowCloud and rsiBearish and inSession and strategy.position_size == 0
+
+// ══════════════════════════════════════════════════════════════════════════════
+// EXECUTION
+// ══════════════════════════════════════════════════════════════════════════════
+
+tick = syminfo.mintick
+
+if longSignal
+    strategy.entry("Long", strategy.long)
+    strategy.exit("LX", "Long", stop=close - slTicks*tick, limit=close + tpTicks*tick)
+
+if shortSignal
+    strategy.entry("Short", strategy.short)
+    strategy.exit("SX", "Short", stop=close + slTicks*tick, limit=close - tpTicks*tick)
+
+// EOD
+if useSession and timeNow >= sessEnd and strategy.position_size != 0
+    strategy.close_all("EOD")
+
+// ══════════════════════════════════════════════════════════════════════════════
+// VISUALS
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Tenkan & Kijun
+plot(tenkan, "Tenkan", color.new(color.blue, 0), 1)
+plot(kijun, "Kijun", color.new(color.red, 0), 1)
+
+// Cloud (displaced)
+p1 = plot(senkouA[displacement], "Senkou A", color.new(color.green, 0), 1)
+p2 = plot(senkouB[displacement], "Senkou B", color.new(color.red, 0), 1)
+fill(p1, p2, color=senkouA[displacement] > senkouB[displacement] ? color.new(color.green, 80) : color.new(color.red, 80))
+
+// Signals
+plotshape(longSignal, "Long", shape.triangleup, location.belowbar, color.lime, size=size.normal)
+plotshape(shortSignal, "Short", shape.triangledown, location.abovebar, color.red, size=size.normal)
+
+// Background based on position vs cloud
+bgcolor(close > cloudTop ? color.new(color.green, 95) : close < cloudBottom ? color.new(color.red, 95) : color.new(color.gray, 95))
+
+// ══════════════════════════════════════════════════════════════════════════════
+// INFO PANEL
+// ══════════════════════════════════════════════════════════════════════════════
+
+var table t = table.new(position.top_right, 2, 6, bgcolor=color.new(color.black, 75))
+if barstate.islast
+    table.cell(t, 0, 0, "ICHI", text_color=color.black, bgcolor=color.yellow)
+    table.cell(t, 1, 0, "RSI", text_color=color.black, bgcolor=color.yellow)
+
+    // Price vs Cloud
+    posVsCloud = close > cloudTop ? "ABOVE" : close < cloudBottom ? "BELOW" : "IN CLOUD"
+    posCol = close > cloudTop ? color.lime : close < cloudBottom ? color.red : color.gray
+    table.cell(t, 0, 1, "Cloud", text_color=color.white)
+    table.cell(t, 1, 1, posVsCloud, text_color=posCol)
+
+    // TK Position
+    tkPos = tenkan > kijun ? "TK+" : "TK-"
+    tkCol = tenkan > kijun ? color.lime : color.red
+    table.cell(t, 0, 2, "TK", text_color=color.white)
+    table.cell(t, 1, 2, tkPos, text_color=tkCol)
+
+    // Cloud Color
+    table.cell(t, 0, 3, "Cloud", text_color=color.white)
+    table.cell(t, 1, 3, cloudBullish ? "BULL" : "BEAR", text_color=cloudBullish ? color.lime : color.red)
+
+    // RSI
+    table.cell(t, 0, 4, "RSI", text_color=color.white)
+    table.cell(t, 1, 4, str.tostring(rsi, "#"), text_color=rsi > 50 ? color.lime : color.red)
+
+    // R:R
+    table.cell(t, 0, 5, "R:R", text_color=color.white)
+    table.cell(t, 1, 5, str.tostring(tpTicks/slTicks, "#.#") + ":1", text_color=color.aqua)

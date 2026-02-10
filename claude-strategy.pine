@@ -1,0 +1,138 @@
+// This Pine Script™ is subject to the terms of the Mozilla Public License 2.0
+// https://mozilla.org/MPL/2.0/
+// © Claude Strategy
+
+//@version=5
+strategy("Day Trading Strategy - Risk Managed", overlay=true, default_qty_type=strategy.percent_of_equity, default_qty_value=2, initial_capital=10000, commission_type=strategy.commission.percent, commission_value=0.05, slippage=1)
+
+// ──────────────────────────────────────────────────────────────────────────────
+// INPUTS
+// ──────────────────────────────────────────────────────────────────────────────
+
+// Trend Filter
+emaFastLen   = input.int(9,   "Fast EMA Length",  minval=1, group="Trend Filter")
+emaSlowLen   = input.int(21,  "Slow EMA Length",  minval=1, group="Trend Filter")
+emaTrendLen  = input.int(50,  "Trend EMA Length", minval=1, group="Trend Filter")
+
+// Entry Signal — RSI
+rsiLen       = input.int(14,  "RSI Length",       minval=1,   group="RSI")
+rsiOB        = input.int(70,  "RSI Overbought",   minval=50,  group="RSI")
+rsiOS        = input.int(30,  "RSI Oversold",     maxval=50,  group="RSI")
+
+// Entry Signal — MACD
+macdFast     = input.int(12,  "MACD Fast",   minval=1, group="MACD")
+macdSlow     = input.int(26,  "MACD Slow",   minval=1, group="MACD")
+macdSignal   = input.int(9,   "MACD Signal", minval=1, group="MACD")
+
+// Risk Management
+atrLen       = input.int(14,  "ATR Length",          minval=1,   group="Risk Management")
+slMult       = input.float(1.5, "Stop Loss ATR Mult",  minval=0.1, step=0.1, group="Risk Management")
+tpMult       = input.float(2.5, "Take Profit ATR Mult", minval=0.1, step=0.1, group="Risk Management")
+useTrailing  = input.bool(true,  "Use Trailing Stop",   group="Risk Management")
+trailMult    = input.float(1.0, "Trailing Stop ATR Mult", minval=0.1, step=0.1, group="Risk Management")
+maxDailyLoss = input.float(2.0, "Max Daily Loss %",    minval=0.1, step=0.1, group="Risk Management")
+
+// Session Filter (exchange timezone)
+useSession   = input.bool(true, "Limit to Session Hours", group="Session")
+sessStart    = input.int(930,   "Session Start (HHMM)",   group="Session")
+sessEnd      = input.int(1555,  "Session End (HHMM)",     group="Session")
+
+// ──────────────────────────────────────────────────────────────────────────────
+// CALCULATIONS
+// ──────────────────────────────────────────────────────────────────────────────
+
+// EMAs
+emaFast  = ta.ema(close, emaFastLen)
+emaSlow  = ta.ema(close, emaSlowLen)
+emaTrend = ta.ema(close, emaTrendLen)
+
+// RSI
+rsi = ta.rsi(close, rsiLen)
+
+// MACD
+[macdLine, signalLine, histLine] = ta.macd(close, macdFast, macdSlow, macdSignal)
+macdCrossUp   = ta.crossover(macdLine, signalLine)
+macdCrossDn   = ta.crossunder(macdLine, signalLine)
+
+// ATR for dynamic stops
+atr = ta.atr(atrLen)
+
+// EMA cross
+emaCrossUp = ta.crossover(emaFast, emaSlow)
+emaCrossDn = ta.crossunder(emaFast, emaSlow)
+
+// Session filter
+currentTime = hour * 100 + minute
+inSession   = not useSession or (currentTime >= sessStart and currentTime <= sessEnd)
+
+// Daily loss tracking — reset each new day
+var float dailyPnL = 0.0
+newDay = ta.change(time("D")) != 0
+if newDay
+    dailyPnL := 0.0
+dailyPnL += strategy.closedtrades.profit(strategy.closedtrades - 1) != dailyPnL ? strategy.netprofit - (strategy.netprofit[1]) : 0
+dailyLossOk = dailyPnL > -(strategy.equity * maxDailyLoss / 100)
+
+// ──────────────────────────────────────────────────────────────────────────────
+// ENTRY CONDITIONS
+// ──────────────────────────────────────────────────────────────────────────────
+
+// Long: EMA cross up + price above trend EMA + RSI not overbought + MACD confirmation
+longCondition  = emaCrossUp and close > emaTrend and rsi < rsiOB and rsi > rsiOS and macdLine > signalLine
+longAllowed    = inSession and dailyLossOk and strategy.position_size == 0
+
+// Short: EMA cross down + price below trend EMA + RSI not oversold + MACD confirmation
+shortCondition = emaCrossDn and close < emaTrend and rsi > rsiOS and rsi < rsiOB and macdLine < signalLine
+shortAllowed   = inSession and dailyLossOk and strategy.position_size == 0
+
+// ──────────────────────────────────────────────────────────────────────────────
+// ENTRIES & EXITS
+// ──────────────────────────────────────────────────────────────────────────────
+
+if longCondition and longAllowed
+    sl = close - atr * slMult
+    tp = close + atr * tpMult
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Long Exit", "Long", stop=sl, limit=tp, trail_points=useTrailing ? atr * trailMult / syminfo.mintick : na, trail_offset=useTrailing ? atr * trailMult / syminfo.mintick : na)
+
+if shortCondition and shortAllowed
+    sl = close + atr * slMult
+    tp = close - atr * tpMult
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Short Exit", "Short", stop=sl, limit=tp, trail_points=useTrailing ? atr * trailMult / syminfo.mintick : na, trail_offset=useTrailing ? atr * trailMult / syminfo.mintick : na)
+
+// Flatten positions outside session
+if useSession and currentTime > sessEnd and strategy.position_size != 0
+    strategy.close_all("Session End")
+
+// ──────────────────────────────────────────────────────────────────────────────
+// PLOTS
+// ──────────────────────────────────────────────────────────────────────────────
+
+pFast  = plot(emaFast,  "Fast EMA",  color=color.new(color.teal, 0),   linewidth=1)
+pSlow  = plot(emaSlow,  "Slow EMA",  color=color.new(color.orange, 0), linewidth=1)
+pTrend = plot(emaTrend, "Trend EMA", color=color.new(color.gray, 30),  linewidth=2)
+
+// Fill between fast/slow EMAs to visualize trend
+fill(pFast, pSlow, color=emaFast > emaSlow ? color.new(color.teal, 85) : color.new(color.red, 85))
+
+// Entry markers
+plotshape(longCondition  and longAllowed,  "Long Signal",  shape.triangleup,   location.belowbar, color.green, size=size.small)
+plotshape(shortCondition and shortAllowed, "Short Signal", shape.triangledown, location.abovebar, color.red,   size=size.small)
+
+// ──────────────────────────────────────────────────────────────────────────────
+// INFO TABLE
+// ──────────────────────────────────────────────────────────────────────────────
+
+var table infoTable = table.new(position.top_right, 2, 5, bgcolor=color.new(color.black, 80), border_width=1)
+if barstate.islast
+    table.cell(infoTable, 0, 0, "ATR",        text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 0, str.tostring(atr, "#.##"), text_color=color.yellow, text_size=size.small)
+    table.cell(infoTable, 0, 1, "Stop Loss",  text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 1, str.tostring(atr * slMult, "#.##"), text_color=color.red, text_size=size.small)
+    table.cell(infoTable, 0, 2, "Take Profit", text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 2, str.tostring(atr * tpMult, "#.##"), text_color=color.green, text_size=size.small)
+    table.cell(infoTable, 0, 3, "R:R Ratio",  text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 3, str.tostring(tpMult / slMult, "#.##"), text_color=color.aqua, text_size=size.small)
+    table.cell(infoTable, 0, 4, "RSI",        text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 4, str.tostring(rsi, "#.##"), text_color=rsi > rsiOB ? color.red : rsi < rsiOS ? color.green : color.white, text_size=size.small)

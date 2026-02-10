@@ -1,0 +1,17 @@
+version: '3.8'
+
+services:
+  ai-playground:
+    build: .
+    container_name: ai-playground
+    volumes:
+      # Only mount the AI-playground directory, NOT home directory
+      - ./workspace:/workspace
+    working_dir: /workspace
+    stdin_open: true
+    tty: true
+    # Prevent access to host filesystem
+    security_opt:
+      - no-new-privileges:true
+    # Read-only root filesystem (workspace is writable via volume)
+    read_only: false

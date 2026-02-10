@@ -1,0 +1,152 @@
+// Futures Scalper V7 - Trend + Pullback
+// KEY: Only trade WITH the daily trend, buy dips in uptrend, sell rips in downtrend
+// For ES/NQ 5m charts
+//@version=5
+strategy("Futures Scalper V7", shorttitle="FUT-V7", overlay=true,
+         pyramiding=0, initial_capital=10000, currency=currency.USD,
+         default_qty_type=strategy.fixed, default_qty_value=1,
+         commission_type=strategy.commission.cash_per_contract, commission_value=2.50,
+         slippage=1)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// INPUTS
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Higher Timeframe Trend (THE KEY)
+htfTrendLen = input.int(50, "HTF Trend EMA", group="Trend")
+
+// Entry EMAs
+emaFast = input.int(8, "Fast EMA", group="Entry")
+emaSlow = input.int(21, "Slow EMA", group="Entry")
+
+// RSI for pullback entries
+rsiLen = input.int(7, "RSI Length", group="RSI")
+rsiPullbackLong = input.int(40, "RSI Pullback Long (<)", group="RSI")
+rsiPullbackShort = input.int(60, "RSI Pullback Short (>)", group="RSI")
+
+// Risk
+slTicks = input.float(8, "Stop Loss Ticks", group="Risk")
+tpTicks = input.float(16, "Take Profit Ticks", group="Risk")
+
+// Session
+sessStart = input.int(940, "Start", group="Session")
+sessEnd = input.int(1545, "End", group="Session")
+
+// ══════════════════════════════════════════════════════════════════════════════
+// HIGHER TIMEFRAME TREND - THE MOST IMPORTANT FILTER
+// ══════════════════════════════════════════════════════════════════════════════
+
+// 50 EMA on current timeframe acts as trend filter
+ema50 = ta.ema(close, htfTrendLen)
+
+// Daily bias from price vs 50 EMA
+dailyBullish = close > ema50
+dailyBearish = close < ema50
+
+// Strong trend = price consistently above/below
+ema50slope = ema50 - ema50[5]
+strongUptrend = dailyBullish and ema50slope > 0
+strongDowntrend = dailyBearish and ema50slope < 0
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ENTRY INDICATORS
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Fast EMAs for timing
+emaF = ta.ema(close, emaFast)
+emaS = ta.ema(close, emaSlow)
+
+// RSI
+rsi = ta.rsi(close, rsiLen)
+
+// Session
+timeNow = hour * 100 + minute
+inSession = timeNow >= sessStart and timeNow < sessEnd
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ENTRY SIGNALS - ONLY WITH THE TREND
+// ══════════════════════════════════════════════════════════════════════════════
+
+// === LONG: Only in uptrend, buy the dip ===
+// 1. Daily trend is UP (price > 50 EMA)
+// 2. Pullback occurred (RSI dipped below 40)
+// 3. Recovery starting (price crosses back above fast EMA)
+
+longTrend = dailyBullish
+longPullback = rsi < rsiPullbackLong or rsi[1] < rsiPullbackLong or rsi[2] < rsiPullbackLong  // Recent pullback
+longRecovery = ta.crossover(close, emaF) or ta.crossover(emaF, emaS)
+longSignal = longTrend and longPullback and longRecovery and inSession and strategy.position_size == 0
+
+// === SHORT: Only in downtrend, sell the rip ===
+shortTrend = dailyBearish
+shortPullback = rsi > rsiPullbackShort or rsi[1] > rsiPullbackShort or rsi[2] > rsiPullbackShort
+shortRecovery = ta.crossunder(close, emaF) or ta.crossunder(emaF, emaS)
+shortSignal = shortTrend and shortPullback and shortRecovery and inSession and strategy.position_size == 0
+
+// ══════════════════════════════════════════════════════════════════════════════
+// EXECUTION
+// ══════════════════════════════════════════════════════════════════════════════
+
+tick = syminfo.mintick
+
+if longSignal
+    strategy.entry("Long", strategy.long)
+    strategy.exit("LX", "Long", stop=close - slTicks*tick, limit=close + tpTicks*tick)
+
+if shortSignal
+    strategy.entry("Short", strategy.short)
+    strategy.exit("SX", "Short", stop=close + slTicks*tick, limit=close - tpTicks*tick)
+
+// EOD
+if timeNow >= sessEnd and strategy.position_size != 0
+    strategy.close_all("EOD")
+
+// ══════════════════════════════════════════════════════════════════════════════
+// VISUALS
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Trend EMA (THE KEY LINE)
+plot(ema50, "50 EMA", color=dailyBullish ? color.lime : color.red, linewidth=3)
+
+// Entry EMAs
+plot(emaF, "Fast EMA", color.new(color.aqua, 0), 1)
+plot(emaS, "Slow EMA", color.new(color.orange, 0), 1)
+
+// Signals
+plotshape(longSignal, "Long", shape.triangleup, location.belowbar, color.lime, size=size.normal)
+plotshape(shortSignal, "Short", shape.triangledown, location.abovebar, color.red, size=size.normal)
+
+// Trend background - GREEN = only longs, RED = only shorts
+bgcolor(strongUptrend ? color.new(color.green, 90) : strongDowntrend ? color.new(color.red, 90) : color.new(color.gray, 95))
+
+// ══════════════════════════════════════════════════════════════════════════════
+// INFO PANEL
+// ══════════════════════════════════════════════════════════════════════════════
+
+var table t = table.new(position.top_right, 2, 6, bgcolor=color.new(color.black, 75))
+if barstate.islast
+    // Header shows allowed direction
+    table.cell(t, 0, 0, "V7", text_color=color.black, bgcolor=dailyBullish ? color.lime : color.red)
+    table.cell(t, 1, 0, dailyBullish ? "LONGS ONLY" : "SHORTS ONLY", text_color=color.black, bgcolor=dailyBullish ? color.lime : color.red)
+
+    // Trend
+    table.cell(t, 0, 1, "Trend", text_color=color.white)
+    table.cell(t, 1, 1, strongUptrend ? "STRONG UP" : strongDowntrend ? "STRONG DN" : dailyBullish ? "UP" : "DOWN",
+               text_color=dailyBullish ? color.lime : color.red)
+
+    // Price vs 50 EMA
+    distFrom50 = ((close - ema50) / ema50) * 100
+    table.cell(t, 0, 2, "vs 50EMA", text_color=color.white)
+    table.cell(t, 1, 2, str.tostring(distFrom50, "#.##") + "%", text_color=distFrom50 > 0 ? color.lime : color.red)
+
+    // RSI
+    table.cell(t, 0, 3, "RSI", text_color=color.white)
+    table.cell(t, 1, 3, str.tostring(rsi, "#"), text_color=rsi < rsiPullbackLong ? color.lime : rsi > rsiPullbackShort ? color.red : color.white)
+
+    // Session
+    table.cell(t, 0, 4, "Session", text_color=color.white)
+    table.cell(t, 1, 4, inSession ? "ACTIVE" : "CLOSED", text_color=inSession ? color.lime : color.red)
+
+    // R:R
+    table.cell(t, 0, 5, "R:R", text_color=color.white)
+    table.cell(t, 1, 5, str.tostring(tpTicks/slTicks, "#.#") + ":1", text_color=color.aqua)

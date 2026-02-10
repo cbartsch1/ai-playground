@@ -1,0 +1,199 @@
+// Combined Strategy: Best of Claude + Gemini
+// Merges Claude's risk management with Gemini's momentum signals
+// Created by multi-AI workflow
+//@version=5
+strategy("Combined AI Strategy", shorttitle="AI-Combined", overlay=true,
+         pyramiding=0, initial_capital=10000, currency=currency.USD,
+         default_qty_type=strategy.percent_of_equity, default_qty_value=2,
+         commission_type=strategy.commission.percent, commission_value=0.05, slippage=1)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// INPUTS
+// ══════════════════════════════════════════════════════════════════════════════
+
+// === Trend Filter (from Claude) ===
+emaFastLen   = input.int(9,   "Fast EMA",   minval=1, group="Trend Filter")
+emaSlowLen   = input.int(21,  "Slow EMA",   minval=1, group="Trend Filter")
+emaTrendLen  = input.int(50,  "Trend EMA",  minval=1, group="Trend Filter")
+
+// === Momentum - MACD (from Gemini) ===
+macdFast     = input.int(12,  "MACD Fast",   minval=1, group="MACD")
+macdSlow     = input.int(26,  "MACD Slow",   minval=1, group="MACD")
+macdSignal   = input.int(9,   "MACD Signal", minval=1, group="MACD")
+
+// === Momentum - RSI (combined) ===
+rsiLen       = input.int(14,  "RSI Length",     minval=1,  group="RSI")
+rsiOB        = input.int(70,  "RSI Overbought", minval=50, group="RSI")
+rsiOS        = input.int(30,  "RSI Oversold",   maxval=50, group="RSI")
+rsiMid       = input.int(50,  "RSI Midline",    group="RSI")  // From Gemini
+
+// === Risk Management (from Claude) ===
+atrLen       = input.int(14,    "ATR Length",           minval=1,   group="Risk")
+slMult       = input.float(1.5, "Stop Loss ATR Mult",   minval=0.1, step=0.1, group="Risk")
+tpMult       = input.float(2.5, "Take Profit ATR Mult", minval=0.1, step=0.1, group="Risk")
+useTrailing  = input.bool(true, "Use Trailing Stop",    group="Risk")
+trailMult    = input.float(1.0, "Trail ATR Mult",       minval=0.1, step=0.1, group="Risk")
+maxDailyLoss = input.float(2.0, "Max Daily Loss %",     minval=0.1, step=0.1, group="Risk")
+
+// === Session Filter (from Claude) ===
+useSession   = input.bool(true, "Use Session Filter", group="Session")
+sessStart    = input.int(930,   "Session Start (HHMM)", group="Session")
+sessEnd      = input.int(1555,  "Session End (HHMM)",   group="Session")
+
+// === Signal-Based Exit (from Gemini) ===
+useSignalExit = input.bool(true, "Use Signal-Based Exit", group="Exit Style")
+
+// ══════════════════════════════════════════════════════════════════════════════
+// CALCULATIONS
+// ══════════════════════════════════════════════════════════════════════════════
+
+// EMAs for trend (Claude)
+emaFast  = ta.ema(close, emaFastLen)
+emaSlow  = ta.ema(close, emaSlowLen)
+emaTrend = ta.ema(close, emaTrendLen)
+
+// MACD for momentum (Gemini)
+[macdLine, signalLine, histLine] = ta.macd(close, macdFast, macdSlow, macdSignal)
+macdCrossUp = ta.crossover(macdLine, signalLine)
+macdCrossDn = ta.crossunder(macdLine, signalLine)
+
+// RSI (combined)
+rsi = ta.rsi(close, rsiLen)
+rsiAboveMid = rsi > rsiMid  // Gemini's momentum filter
+rsiBelowMid = rsi < rsiMid
+
+// ATR for stops (Claude)
+atr = ta.atr(atrLen)
+
+// EMA crosses (Claude)
+emaCrossUp = ta.crossover(emaFast, emaSlow)
+emaCrossDn = ta.crossunder(emaFast, emaSlow)
+
+// Session filter (Claude)
+currentTime = hour * 100 + minute
+inSession = not useSession or (currentTime >= sessStart and currentTime <= sessEnd)
+
+// Daily loss tracking (Claude)
+var float dailyPnL = 0.0
+newDay = ta.change(time("D")) != 0
+if newDay
+    dailyPnL := 0.0
+dailyPnL += strategy.closedtrades.profit(strategy.closedtrades - 1) != dailyPnL ? strategy.netprofit - strategy.netprofit[1] : 0
+dailyLossOk = dailyPnL > -(strategy.equity * maxDailyLoss / 100)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ENTRY CONDITIONS (Combined Logic)
+// ══════════════════════════════════════════════════════════════════════════════
+
+// LONG: EMA cross up + above trend + MACD bullish + RSI above midline (not overbought)
+longSignal = emaCrossUp and close > emaTrend and macdLine > signalLine and rsiAboveMid and rsi < rsiOB
+longAllowed = inSession and dailyLossOk and strategy.position_size == 0
+
+// SHORT: EMA cross down + below trend + MACD bearish + RSI below midline (not oversold)
+shortSignal = emaCrossDn and close < emaTrend and macdLine < signalLine and rsiBelowMid and rsi > rsiOS
+shortAllowed = inSession and dailyLossOk and strategy.position_size == 0
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ENTRIES & EXITS
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Long Entry
+if longSignal and longAllowed
+    sl = close - atr * slMult
+    tp = close + atr * tpMult
+    strategy.entry("Long", strategy.long)
+    if useTrailing
+        strategy.exit("Long Exit", "Long", stop=sl, limit=tp,
+                     trail_points=atr * trailMult / syminfo.mintick,
+                     trail_offset=atr * trailMult / syminfo.mintick)
+    else
+        strategy.exit("Long Exit", "Long", stop=sl, limit=tp)
+
+// Short Entry
+if shortSignal and shortAllowed
+    sl = close + atr * slMult
+    tp = close - atr * tpMult
+    strategy.entry("Short", strategy.short)
+    if useTrailing
+        strategy.exit("Short Exit", "Short", stop=sl, limit=tp,
+                     trail_points=atr * trailMult / syminfo.mintick,
+                     trail_offset=atr * trailMult / syminfo.mintick)
+    else
+        strategy.exit("Short Exit", "Short", stop=sl, limit=tp)
+
+// Signal-based exits (Gemini style) - optional early exit on opposing signal
+if useSignalExit
+    if strategy.position_size > 0 and (macdCrossDn or ta.crossunder(rsi, rsiMid))
+        strategy.close("Long", comment="Signal Exit")
+    if strategy.position_size < 0 and (macdCrossUp or ta.crossover(rsi, rsiMid))
+        strategy.close("Short", comment="Signal Exit")
+
+// Session end flatten (Claude)
+if useSession and currentTime > sessEnd and strategy.position_size != 0
+    strategy.close_all("Session End")
+
+// ══════════════════════════════════════════════════════════════════════════════
+// VISUALS
+// ══════════════════════════════════════════════════════════════════════════════
+
+// EMA Ribbon (Claude style)
+pFast  = plot(emaFast,  "Fast EMA",  color.new(color.teal, 0),   linewidth=1)
+pSlow  = plot(emaSlow,  "Slow EMA",  color.new(color.orange, 0), linewidth=1)
+pTrend = plot(emaTrend, "Trend EMA", color.new(color.gray, 30),  linewidth=2)
+fill(pFast, pSlow, color=emaFast > emaSlow ? color.new(color.teal, 85) : color.new(color.red, 85))
+
+// Entry signals
+plotshape(longSignal and longAllowed,   "Long",  shape.triangleup,   location.belowbar, color.green, size=size.small)
+plotshape(shortSignal and shortAllowed, "Short", shape.triangledown, location.abovebar, color.red,   size=size.small)
+
+// MACD Histogram in separate pane (Gemini style)
+plot(histLine, "MACD Hist", color=histLine >= 0 ? (histLine > histLine[1] ? color.green : color.lime) : (histLine < histLine[1] ? color.red : color.orange), style=plot.style_columns, display=display.pane)
+plot(macdLine, "MACD", color.blue, display=display.pane)
+plot(signalLine, "Signal", color.orange, display=display.pane)
+hline(0, "Zero", color.gray)
+
+// RSI in separate pane (Gemini style)
+plot(rsi, "RSI", color.purple, display=display.pane)
+hline(rsiOB, "Overbought", color.red)
+hline(rsiOS, "Oversold", color.green)
+hline(rsiMid, "Midline", color.gray, linestyle=hline.style_dotted)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// INFO TABLE (Claude style, enhanced)
+// ══════════════════════════════════════════════════════════════════════════════
+
+var table infoTable = table.new(position.top_right, 2, 7, bgcolor=color.new(color.black, 80), border_width=1)
+if barstate.islast
+    // Header
+    table.cell(infoTable, 0, 0, "AI Combined", text_color=color.aqua, text_size=size.small, bgcolor=color.new(color.teal, 70))
+    table.cell(infoTable, 1, 0, "Strategy",    text_color=color.aqua, text_size=size.small, bgcolor=color.new(color.teal, 70))
+
+    // Trend
+    trendStr = emaFast > emaSlow and close > emaTrend ? "BULLISH" : emaFast < emaSlow and close < emaTrend ? "BEARISH" : "NEUTRAL"
+    trendCol = trendStr == "BULLISH" ? color.green : trendStr == "BEARISH" ? color.red : color.gray
+    table.cell(infoTable, 0, 1, "Trend",     text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 1, trendStr,    text_color=trendCol,    text_size=size.small)
+
+    // MACD
+    macdStr = macdLine > signalLine ? "BULLISH" : "BEARISH"
+    macdCol = macdLine > signalLine ? color.green : color.red
+    table.cell(infoTable, 0, 2, "MACD",      text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 2, macdStr,     text_color=macdCol,     text_size=size.small)
+
+    // RSI
+    table.cell(infoTable, 0, 3, "RSI",       text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 3, str.tostring(rsi, "#.#"), text_color=rsi > rsiOB ? color.red : rsi < rsiOS ? color.green : color.white, text_size=size.small)
+
+    // ATR / Stops
+    table.cell(infoTable, 0, 4, "ATR",       text_color=color.white,  text_size=size.small)
+    table.cell(infoTable, 1, 4, str.tostring(atr, "#.##"), text_color=color.yellow, text_size=size.small)
+
+    // R:R
+    table.cell(infoTable, 0, 5, "R:R",       text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 5, str.tostring(tpMult / slMult, "#.##"), text_color=color.aqua, text_size=size.small)
+
+    // Session
+    sessStr = inSession ? "ACTIVE" : "CLOSED"
+    sessCol = inSession ? color.green : color.red
+    table.cell(infoTable, 0, 6, "Session",   text_color=color.white, text_size=size.small)
+    table.cell(infoTable, 1, 6, sessStr,     text_color=sessCol,     text_size=size.small)

@@ -1,0 +1,242 @@
+// Futures Scalper V5 - Institutional Edge
+// VWAP + Previous Day Levels + Opening Range + Volume
+// Designed for ES/NQ 5m charts
+//@version=5
+strategy("Futures Scalper V5", shorttitle="FUT-V5", overlay=true,
+         pyramiding=0, initial_capital=10000, currency=currency.USD,
+         default_qty_type=strategy.fixed, default_qty_value=1,
+         commission_type=strategy.commission.cash_per_contract, commission_value=2.50,
+         slippage=1, calc_on_order_fills=true)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// INPUTS
+// ══════════════════════════════════════════════════════════════════════════════
+
+// EMAs
+emaFast = input.int(9, "Fast EMA", group="Trend")
+emaSlow = input.int(21, "Slow EMA", group="Trend")
+
+// VWAP Settings
+useVwapBands = input.bool(true, "Use VWAP Bands", group="VWAP")
+vwapStdDev = input.float(1.0, "VWAP StdDev", step=0.1, group="VWAP")
+
+// Volume Filter
+useVolume = input.bool(true, "Require Above Avg Volume", group="Volume")
+volLen = input.int(20, "Volume MA Length", group="Volume")
+volMult = input.float(0.8, "Volume Threshold Mult", step=0.1, group="Volume")
+
+// Previous Day Levels
+usePDLevels = input.bool(true, "Use Prev Day Levels", group="Levels")
+
+// Opening Range (first 30 min)
+useOR = input.bool(true, "Use Opening Range", group="Opening Range")
+orMinutes = input.int(30, "OR Minutes", group="Opening Range")
+
+// Risk
+slTicks = input.float(10, "Stop Loss Ticks", group="Risk")
+tpTicks = input.float(25, "Take Profit Ticks", group="Risk")
+
+// Session
+sessStart = input.int(945, "Session Start", group="Session")
+sessEnd = input.int(1545, "Session End", group="Session")
+
+// ══════════════════════════════════════════════════════════════════════════════
+// PREVIOUS DAY LEVELS
+// ══════════════════════════════════════════════════════════════════════════════
+
+var float pdHigh = na
+var float pdLow = na
+var float pdClose = na
+
+newDay = ta.change(time("D"))
+if newDay
+    pdHigh := high[1]
+    pdLow := low[1]
+    pdClose := close[1]
+
+// Get proper previous day values
+pdh = request.security(syminfo.tickerid, "D", high[1], lookahead=barmerge.lookahead_on)
+pdl = request.security(syminfo.tickerid, "D", low[1], lookahead=barmerge.lookahead_on)
+pdc = request.security(syminfo.tickerid, "D", close[1], lookahead=barmerge.lookahead_on)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// OPENING RANGE
+// ══════════════════════════════════════════════════════════════════════════════
+
+var float orHigh = na
+var float orLow = na
+var bool orComplete = false
+
+marketOpen = hour == 9 and minute == 30
+orEnd = hour == 10 and minute == 0  // 30 min after open
+
+if marketOpen
+    orHigh := high
+    orLow := low
+    orComplete := false
+
+if not orComplete and hour == 9 and minute >= 30
+    orHigh := math.max(orHigh, high)
+    orLow := math.min(orLow, low)
+
+if orEnd
+    orComplete := true
+
+// ══════════════════════════════════════════════════════════════════════════════
+// VWAP WITH BANDS
+// ══════════════════════════════════════════════════════════════════════════════
+
+vwapValue = ta.vwap(hlc3)
+
+// Calculate VWAP standard deviation bands
+vwapSum = ta.cum(hlc3 * volume)
+volSum = ta.cum(volume)
+vwap2 = vwapSum / volSum
+
+// Variance calculation for bands
+variance = ta.cum(math.pow(hlc3 - vwap2, 2) * volume) / volSum
+vwapStd = math.sqrt(variance)
+
+vwapUpper = vwapValue + vwapStd * vwapStdDev
+vwapLower = vwapValue - vwapStd * vwapStdDev
+
+// ══════════════════════════════════════════════════════════════════════════════
+// INDICATORS
+// ══════════════════════════════════════════════════════════════════════════════
+
+// EMAs
+emaF = ta.ema(close, emaFast)
+emaS = ta.ema(close, emaSlow)
+
+// Volume
+vol = volume
+volMA = ta.sma(vol, volLen)
+highVol = not useVolume or vol > volMA * volMult
+
+// Trend
+bullTrend = emaF > emaS
+bearTrend = emaF < emaS
+
+// Session
+timeNow = hour * 100 + minute
+inSession = timeNow >= sessStart and timeNow < sessEnd
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ENTRY SIGNALS - Multiple Confirmation
+// ══════════════════════════════════════════════════════════════════════════════
+
+// === LONG CONDITIONS ===
+// 1. EMA bullish (fast > slow)
+// 2. Price above VWAP (institutional bias)
+// 3. Price bounced off VWAP lower band OR broke above OR high
+// 4. Price above previous day close (bullish context)
+// 5. Volume above average
+// 6. After opening range if enabled
+
+emaBullish = bullTrend
+aboveVwap = close > vwapValue
+vwapBounce = low <= vwapLower and close > vwapLower  // Bounce off lower band
+vwapBreakout = ta.crossover(close, vwapUpper)        // Break above upper band
+abovePDC = not usePDLevels or close > pdc
+afterOR = not useOR or orComplete
+
+longSetup = emaBullish and aboveVwap and (vwapBounce or vwapBreakout or ta.crossover(emaF, emaS))
+longFilter = abovePDC and highVol and afterOR and inSession
+longSignal = longSetup and longFilter and strategy.position_size == 0
+
+// === SHORT CONDITIONS ===
+emaBearish = bearTrend
+belowVwap = close < vwapValue
+vwapReject = high >= vwapUpper and close < vwapUpper  // Reject at upper band
+vwapBreakdown = ta.crossunder(close, vwapLower)       // Break below lower band
+belowPDC = not usePDLevels or close < pdc
+
+shortSetup = emaBearish and belowVwap and (vwapReject or vwapBreakdown or ta.crossunder(emaF, emaS))
+shortFilter = belowPDC and highVol and afterOR and inSession
+shortSignal = shortSetup and shortFilter and strategy.position_size == 0
+
+// ══════════════════════════════════════════════════════════════════════════════
+// EXECUTION
+// ══════════════════════════════════════════════════════════════════════════════
+
+tick = syminfo.mintick
+
+if longSignal
+    strategy.entry("Long", strategy.long)
+    strategy.exit("LX", "Long", stop=close - slTicks*tick, limit=close + tpTicks*tick)
+
+if shortSignal
+    strategy.entry("Short", strategy.short)
+    strategy.exit("SX", "Short", stop=close + slTicks*tick, limit=close - tpTicks*tick)
+
+// Close at session end
+if timeNow >= sessEnd and strategy.position_size != 0
+    strategy.close_all("EOD")
+
+// ══════════════════════════════════════════════════════════════════════════════
+// VISUALS
+// ══════════════════════════════════════════════════════════════════════════════
+
+// EMAs
+plot(emaF, "EMA Fast", color.lime, 2)
+plot(emaS, "EMA Slow", color.red, 2)
+
+// VWAP and bands
+plot(vwapValue, "VWAP", color.yellow, 2)
+p1 = plot(useVwapBands ? vwapUpper : na, "VWAP+", color.new(color.yellow, 60))
+p2 = plot(useVwapBands ? vwapLower : na, "VWAP-", color.new(color.yellow, 60))
+fill(p1, p2, color.new(color.yellow, 90))
+
+// Previous day levels
+plot(usePDLevels ? pdh : na, "PDH", color.new(color.blue, 0), 1, plot.style_linebr)
+plot(usePDLevels ? pdl : na, "PDL", color.new(color.blue, 0), 1, plot.style_linebr)
+plot(usePDLevels ? pdc : na, "PDC", color.new(color.purple, 0), 1, plot.style_linebr)
+
+// Opening range
+plot(useOR and orComplete ? orHigh : na, "OR High", color.new(color.orange, 0), 1, plot.style_linebr)
+plot(useOR and orComplete ? orLow : na, "OR Low", color.new(color.orange, 0), 1, plot.style_linebr)
+
+// Signals
+plotshape(longSignal, "Long", shape.triangleup, location.belowbar, color.lime, size=size.small)
+plotshape(shortSignal, "Short", shape.triangledown, location.abovebar, color.red, size=size.small)
+
+// Trend background
+bgcolor(bullTrend and aboveVwap ? color.new(color.green, 93) : bearTrend and belowVwap ? color.new(color.red, 93) : color.new(color.gray, 97))
+
+// ══════════════════════════════════════════════════════════════════════════════
+// INFO PANEL
+// ══════════════════════════════════════════════════════════════════════════════
+
+var table t = table.new(position.top_right, 2, 8, bgcolor=color.new(color.black, 75))
+if barstate.islast
+    table.cell(t, 0, 0, "V5", text_color=color.black, bgcolor=color.yellow)
+    table.cell(t, 1, 0, "INST", text_color=color.black, bgcolor=color.yellow)
+
+    // Trend
+    table.cell(t, 0, 1, "Trend", text_color=color.white)
+    table.cell(t, 1, 1, bullTrend ? "BULL" : bearTrend ? "BEAR" : "FLAT", text_color=bullTrend ? color.lime : bearTrend ? color.red : color.gray)
+
+    // VWAP
+    table.cell(t, 0, 2, "VWAP", text_color=color.white)
+    table.cell(t, 1, 2, close > vwapValue ? "ABOVE" : "BELOW", text_color=close > vwapValue ? color.lime : color.red)
+
+    // PDC
+    table.cell(t, 0, 3, "vs PDC", text_color=color.white)
+    table.cell(t, 1, 3, close > pdc ? "ABOVE" : "BELOW", text_color=close > pdc ? color.lime : color.red)
+
+    // Volume
+    volStatus = vol > volMA * 1.2 ? "HIGH" : vol > volMA * volMult ? "OK" : "LOW"
+    table.cell(t, 0, 4, "Volume", text_color=color.white)
+    table.cell(t, 1, 4, volStatus, text_color=vol > volMA ? color.lime : color.gray)
+
+    // OR Status
+    table.cell(t, 0, 5, "OR", text_color=color.white)
+    table.cell(t, 1, 5, orComplete ? "SET" : "FORMING", text_color=orComplete ? color.lime : color.orange)
+
+    // Session
+    table.cell(t, 0, 6, "Session", text_color=color.white)
+    table.cell(t, 1, 6, inSession ? "ACTIVE" : "CLOSED", text_color=inSession ? color.lime : color.red)
+
+    // R:R
+    table.cell(t, 0, 7, "R:R", text_color=color.white)
+    table.cell(t, 1, 7, str.tostring(tpTicks/slTicks, "#.#") + ":1", text_color=color.aqua)

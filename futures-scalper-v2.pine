@@ -1,0 +1,259 @@
+// Futures Scalper V2 - Optimized for Profitability
+// Higher timeframe trend + Volume + Better entries
+// Designed for ES/NQ on 1m-5m charts
+//@version=5
+strategy("Futures Scalper V2", shorttitle="FUT-V2", overlay=true,
+         pyramiding=0, initial_capital=10000, currency=currency.USD,
+         default_qty_type=strategy.fixed, default_qty_value=1,
+         commission_type=strategy.commission.cash_per_contract, commission_value=2.50,
+         slippage=1, calc_on_every_tick=false)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// INPUTS
+// ══════════════════════════════════════════════════════════════════════════════
+
+// === Trend Structure ===
+emaFast = input.int(8, "Fast EMA", minval=1, group="Trend")
+emaSlow = input.int(21, "Slow EMA", minval=1, group="Trend")
+emaTrend = input.int(50, "Trend EMA (HTF filter)", minval=1, group="Trend")
+
+// === Momentum ===
+rsiLen = input.int(9, "RSI Length", minval=1, group="Momentum")
+rsiOB = input.int(65, "RSI Overbought", group="Momentum")
+rsiOS = input.int(35, "RSI Oversold", group="Momentum")
+momLen = input.int(10, "Momentum Length", minval=1, group="Momentum")
+
+// === Volume Filter ===
+useVolume = input.bool(true, "Use Volume Filter", group="Volume")
+volLen = input.int(20, "Volume MA Length", minval=1, group="Volume")
+volMult = input.float(1.0, "Volume Multiplier", minval=0.5, step=0.1, group="Volume")
+
+// === VWAP ===
+useVwap = input.bool(true, "Use VWAP Filter", group="VWAP")
+vwapBand = input.float(0.0015, "VWAP Band %", minval=0.0001, step=0.0001, group="VWAP")
+
+// === Risk Management ===
+slTicks = input.float(6, "Stop Loss (ticks)", minval=1, group="Risk")
+tpTicks = input.float(18, "Take Profit (ticks)", minval=1, group="Risk")
+useTrailStop = input.bool(true, "Use Trailing Stop", group="Risk")
+trailTicks = input.float(8, "Trail Activation (ticks)", minval=1, group="Risk")
+trailOffset = input.float(4, "Trail Offset (ticks)", minval=1, group="Risk")
+
+// === Session & Time Filters ===
+useSession = input.bool(true, "Use Session Filter", group="Session")
+sessStart = input.int(945, "Session Start (avoid open chop)", group="Session")
+sessEnd = input.int(1545, "Session End (avoid close)", group="Session")
+avoidLunch = input.bool(true, "Avoid Lunch (11:30-13:00)", group="Session")
+
+// === Trade Management ===
+maxTrades = input.int(8, "Max Trades Per Day", minval=1, group="Management")
+cooldownBars = input.int(5, "Cooldown Bars After Trade", minval=0, group="Management")
+
+// ══════════════════════════════════════════════════════════════════════════════
+// CALCULATIONS
+// ══════════════════════════════════════════════════════════════════════════════
+
+// EMAs
+ema8 = ta.ema(close, emaFast)
+ema21 = ta.ema(close, emaSlow)
+ema50 = ta.ema(close, emaTrend)
+
+// RSI
+rsi = ta.rsi(close, rsiLen)
+
+// Momentum (Rate of Change)
+mom = ta.mom(close, momLen)
+
+// Volume
+vol = volume
+volMA = ta.sma(vol, volLen)
+highVol = not useVolume or vol > (volMA * volMult)
+
+// VWAP with bands
+vwapVal = ta.vwap(hlc3)
+vwapUpper = vwapVal * (1 + vwapBand)
+vwapLower = vwapVal * (1 - vwapBand)
+
+// Session & Time
+currentTime = hour * 100 + minute
+inSession = not useSession or (currentTime >= sessStart and currentTime < sessEnd)
+inLunch = avoidLunch and (currentTime >= 1130 and currentTime < 1300)
+goodTime = inSession and not inLunch
+
+// Trade counting (reset daily)
+var int dailyTrades = 0
+newDay = ta.change(time("D")) != 0
+if newDay
+    dailyTrades := 0
+canTrade = dailyTrades < maxTrades
+
+// Cooldown after trade
+var int barsSinceTrade = 100
+barsSinceTrade := barsSinceTrade + 1
+cooledDown = barsSinceTrade > cooldownBars
+
+// ══════════════════════════════════════════════════════════════════════════════
+// TREND STRUCTURE
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Higher timeframe trend (price vs 50 EMA)
+bullTrend = close > ema50 and ema8 > ema50
+bearTrend = close < ema50 and ema8 < ema50
+
+// EMA alignment
+bullStack = ema8 > ema21 and ema21 > ema50
+bearStack = ema8 < ema21 and ema21 < ema50
+
+// Trend strength
+strongBull = bullTrend and bullStack
+strongBear = bearTrend and bearStack
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ENTRY SIGNALS - Multiple confirmation
+// ══════════════════════════════════════════════════════════════════════════════
+
+// === LONG CONDITIONS ===
+// 1. Trend: Price above 50 EMA (higher timeframe bullish)
+// 2. Structure: Fast EMA crossed above slow OR price pulling back to fast EMA
+// 3. Momentum: RSI > 50 but not overbought, positive momentum
+// 4. Volume: Above average
+// 5. VWAP: Price above VWAP (institutional bias)
+
+longTrend = bullTrend
+longCross = ta.crossover(ema8, ema21)
+longPullback = bullStack and ta.crossover(close, ema8) and close[1] < ema8[1]
+longMomentum = rsi > 50 and rsi < rsiOB and mom > 0
+longVwap = not useVwap or close > vwapVal
+longVolume = highVol
+
+longEntry = (longCross or longPullback) and longTrend and longMomentum and longVwap and longVolume
+
+// === SHORT CONDITIONS ===
+shortTrend = bearTrend
+shortCross = ta.crossunder(ema8, ema21)
+shortPullback = bearStack and ta.crossunder(close, ema8) and close[1] > ema8[1]
+shortMomentum = rsi < 50 and rsi > rsiOS and mom < 0
+shortVwap = not useVwap or close < vwapVal
+shortVolume = highVol
+
+shortEntry = (shortCross or shortPullback) and shortTrend and shortMomentum and shortVwap and shortVolume
+
+// === FINAL SIGNAL ===
+goLong = longEntry and goodTime and canTrade and cooledDown and strategy.position_size == 0
+goShort = shortEntry and goodTime and canTrade and cooledDown and strategy.position_size == 0
+
+// ══════════════════════════════════════════════════════════════════════════════
+// TRADE EXECUTION
+// ══════════════════════════════════════════════════════════════════════════════
+
+tickSize = syminfo.mintick
+
+// Long Entry
+if goLong
+    dailyTrades += 1
+    barsSinceTrade := 0
+
+    stopPrice = close - (slTicks * tickSize)
+    takePrice = close + (tpTicks * tickSize)
+
+    strategy.entry("Long", strategy.long)
+
+    if useTrailStop
+        strategy.exit("Long Exit", "Long",
+                     stop=stopPrice,
+                     limit=takePrice,
+                     trail_points=trailTicks,
+                     trail_offset=trailOffset)
+    else
+        strategy.exit("Long Exit", "Long", stop=stopPrice, limit=takePrice)
+
+// Short Entry
+if goShort
+    dailyTrades += 1
+    barsSinceTrade := 0
+
+    stopPrice = close + (slTicks * tickSize)
+    takePrice = close - (tpTicks * tickSize)
+
+    strategy.entry("Short", strategy.short)
+
+    if useTrailStop
+        strategy.exit("Short Exit", "Short",
+                     stop=stopPrice,
+                     limit=takePrice,
+                     trail_points=trailTicks,
+                     trail_offset=trailOffset)
+    else
+        strategy.exit("Short Exit", "Short", stop=stopPrice, limit=takePrice)
+
+// Flatten at session end
+if useSession and currentTime >= sessEnd and strategy.position_size != 0
+    strategy.close_all("EOD Flat")
+
+// ══════════════════════════════════════════════════════════════════════════════
+// VISUALS
+// ══════════════════════════════════════════════════════════════════════════════
+
+// EMAs
+plot(ema8, "EMA 8", color.new(color.lime, 0), linewidth=1)
+plot(ema21, "EMA 21", color.new(color.orange, 0), linewidth=1)
+plot(ema50, "EMA 50", color.new(color.white, 20), linewidth=2)
+
+// VWAP
+plot(vwapVal, "VWAP", color.new(color.yellow, 0), linewidth=2)
+plot(useVwap ? vwapUpper : na, "VWAP+", color.new(color.yellow, 70), linewidth=1)
+plot(useVwap ? vwapLower : na, "VWAP-", color.new(color.yellow, 70), linewidth=1)
+
+// Entry signals
+plotshape(goLong, "Long", shape.triangleup, location.belowbar, color.lime, size=size.normal)
+plotshape(goShort, "Short", shape.triangledown, location.abovebar, color.red, size=size.normal)
+
+// Trend background
+bgcolor(strongBull ? color.new(color.green, 92) : strongBear ? color.new(color.red, 92) : color.new(color.gray, 95))
+
+// Session shading
+bgcolor(not goodTime ? color.new(color.purple, 90) : na, title="No Trade Zone")
+
+// ══════════════════════════════════════════════════════════════════════════════
+// INFO PANEL
+// ══════════════════════════════════════════════════════════════════════════════
+
+var table panel = table.new(position.top_right, 2, 8, bgcolor=color.new(color.black, 75), border_width=1)
+if barstate.islast
+    // Header
+    table.cell(panel, 0, 0, "SCALPER V2", text_color=color.yellow, bgcolor=color.new(color.blue, 50), text_size=size.small)
+    table.cell(panel, 1, 0, "═══════", text_color=color.yellow, bgcolor=color.new(color.blue, 50), text_size=size.small)
+
+    // Trend
+    trendTxt = strongBull ? "STRONG ↑" : strongBear ? "STRONG ↓" : bullTrend ? "BULL" : bearTrend ? "BEAR" : "CHOP"
+    trendCol = strongBull ? color.lime : strongBear ? color.red : bullTrend ? color.green : bearTrend ? color.orange : color.gray
+    table.cell(panel, 0, 1, "Trend", text_color=color.white, text_size=size.small)
+    table.cell(panel, 1, 1, trendTxt, text_color=trendCol, text_size=size.small)
+
+    // RSI
+    table.cell(panel, 0, 2, "RSI", text_color=color.white, text_size=size.small)
+    table.cell(panel, 1, 2, str.tostring(rsi, "#.#"), text_color=rsi > rsiOB ? color.red : rsi < rsiOS ? color.green : color.white, text_size=size.small)
+
+    // Momentum
+    table.cell(panel, 0, 3, "Mom", text_color=color.white, text_size=size.small)
+    table.cell(panel, 1, 3, mom > 0 ? "+" + str.tostring(mom, "#.##") : str.tostring(mom, "#.##"), text_color=mom > 0 ? color.green : color.red, text_size=size.small)
+
+    // VWAP
+    table.cell(panel, 0, 4, "VWAP", text_color=color.white, text_size=size.small)
+    table.cell(panel, 1, 4, close > vwapVal ? "ABOVE ↑" : "BELOW ↓", text_color=close > vwapVal ? color.green : color.red, text_size=size.small)
+
+    // Volume
+    volStatus = vol > volMA * 1.5 ? "HIGH" : vol > volMA ? "OK" : "LOW"
+    volCol = vol > volMA * 1.5 ? color.lime : vol > volMA ? color.green : color.gray
+    table.cell(panel, 0, 5, "Volume", text_color=color.white, text_size=size.small)
+    table.cell(panel, 1, 5, volStatus, text_color=volCol, text_size=size.small)
+
+    // Daily Trades
+    table.cell(panel, 0, 6, "Trades", text_color=color.white, text_size=size.small)
+    table.cell(panel, 1, 6, str.tostring(dailyTrades) + "/" + str.tostring(maxTrades), text_color=dailyTrades >= maxTrades ? color.red : color.white, text_size=size.small)
+
+    // Session
+    sessStatus = goodTime ? "ACTIVE" : inLunch ? "LUNCH" : "CLOSED"
+    sessCol = goodTime ? color.green : color.red
+    table.cell(panel, 0, 7, "Session", text_color=color.white, text_size=size.small)
+    table.cell(panel, 1, 7, sessStatus, text_color=sessCol, text_size=size.small)

@@ -1,0 +1,32 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(node --version:*)",
+      "Bash(npm:*)",
+      "Bash(curl:*)",
+      "Bash(echo:*)",
+      "Bash(~/.zshrc)",
+      "Bash(export:*)",
+      "Bash(grok --help:*)",
+      "Bash(grok-cli:*)",
+      "WebSearch",
+      "Bash(grok:*)",
+      "Bash(ls:*)",
+      "Bash(cat:*)",
+      "Bash(grok-chat:*)",
+      "Bash(gemini:*)",
+      "Bash(claude --version:*)",
+      "Bash(brew upgrade:*)",
+      "Bash(for:*)",
+      "Bash(do)",
+      "Bash(if [ -f \"gemini-strategy.pine\" ])",
+      "Bash(then)",
+      "Bash(exit:*)",
+      "Bash(fi)",
+      "Bash(done)",
+      "Bash(brew install:*)",
+      "Bash(open:*)",
+      "Bash(pbcopy:*)"
+    ]
+  }
+}

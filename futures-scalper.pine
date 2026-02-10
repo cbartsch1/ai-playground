@@ -1,0 +1,147 @@
+// Futures Intraday Scalper
+// Designed for ES/NQ on 1m-5m charts
+// Generates multiple trades per session
+//@version=5
+strategy("Futures Scalper", shorttitle="FUT-Scalp", overlay=true,
+         pyramiding=0, initial_capital=10000, currency=currency.USD,
+         default_qty_type=strategy.fixed, default_qty_value=1,
+         commission_type=strategy.commission.cash_per_contract, commission_value=2.50, slippage=1)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// INPUTS - Optimized for intraday scalping
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Fast EMA Crossover (quick signals)
+emaFast = input.int(5, "Fast EMA", minval=1, group="Trend")
+emaSlow = input.int(13, "Slow EMA", minval=1, group="Trend")
+
+// RSI for momentum (faster period)
+rsiLen = input.int(7, "RSI Length", minval=1, group="Momentum")
+rsiHigh = input.int(60, "RSI Long Above", group="Momentum")
+rsiLow = input.int(40, "RSI Short Below", group="Momentum")
+
+// VWAP filter (institutional reference)
+useVwap = input.bool(true, "Use VWAP Filter", group="Filters")
+
+// ATR for stops
+atrLen = input.int(7, "ATR Length", minval=1, group="Risk")
+slTicks = input.float(8, "Stop Loss (ticks)", minval=1, group="Risk")
+tpTicks = input.float(12, "Take Profit (ticks)", minval=1, group="Risk")
+
+// Session (futures RTH)
+useSession = input.bool(true, "Use RTH Session", group="Session")
+sessStart = input.int(930, "Session Start", group="Session")
+sessEnd = input.int(1600, "Session End", group="Session")
+
+// ══════════════════════════════════════════════════════════════════════════════
+// CALCULATIONS
+// ══════════════════════════════════════════════════════════════════════════════
+
+// EMAs
+ema5 = ta.ema(close, emaFast)
+ema13 = ta.ema(close, emaSlow)
+
+// RSI
+rsi = ta.rsi(close, rsiLen)
+
+// VWAP
+vwapValue = ta.vwap(hlc3)
+
+// ATR
+atr = ta.atr(atrLen)
+
+// Session check
+currentTime = hour * 100 + minute
+inSession = not useSession or (currentTime >= sessStart and currentTime < sessEnd)
+
+// Trend direction
+bullish = ema5 > ema13
+bearish = ema5 < ema13
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ENTRY CONDITIONS - Simplified for more trades
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Long: Fast EMA cross above slow + RSI shows momentum + (optional) above VWAP
+longCross = ta.crossover(ema5, ema13)
+longMomentum = rsi > rsiHigh
+longVwap = not useVwap or close > vwapValue
+longSignal = longCross and longMomentum and longVwap and inSession
+
+// Short: Fast EMA cross below slow + RSI shows weakness + (optional) below VWAP
+shortCross = ta.crossunder(ema5, ema13)
+shortMomentum = rsi < rsiLow
+shortVwap = not useVwap or close < vwapValue
+shortSignal = shortCross and shortMomentum and shortVwap and inSession
+
+// Alternative: Pullback entries (more frequent)
+longPullback = bullish and ta.crossover(close, ema5) and rsi > 50 and inSession
+shortPullback = bearish and ta.crossunder(close, ema5) and rsi < 50 and inSession
+
+// Combined signals
+goLong = longSignal or longPullback
+goShort = shortSignal or shortPullback
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ENTRIES & EXITS
+// ══════════════════════════════════════════════════════════════════════════════
+
+tickSize = syminfo.mintick
+
+if goLong and strategy.position_size <= 0
+    strategy.entry("Long", strategy.long)
+    strategy.exit("Long Exit", "Long",
+                 stop=close - (slTicks * tickSize),
+                 limit=close + (tpTicks * tickSize))
+
+if goShort and strategy.position_size >= 0
+    strategy.entry("Short", strategy.short)
+    strategy.exit("Short Exit", "Short",
+                 stop=close + (slTicks * tickSize),
+                 limit=close - (tpTicks * tickSize))
+
+// Flatten at session end
+if useSession and currentTime >= sessEnd and strategy.position_size != 0
+    strategy.close_all("EOD Flat")
+
+// ══════════════════════════════════════════════════════════════════════════════
+// VISUALS
+// ══════════════════════════════════════════════════════════════════════════════
+
+// EMAs
+plot(ema5, "EMA 5", color.new(color.lime, 0), linewidth=2)
+plot(ema13, "EMA 13", color.new(color.red, 0), linewidth=2)
+
+// VWAP
+plot(useVwap ? vwapValue : na, "VWAP", color.new(color.yellow, 0), linewidth=2, style=plot.style_circles)
+
+// Entry signals
+plotshape(goLong, "Long", shape.triangleup, location.belowbar, color.green, size=size.small)
+plotshape(goShort, "Short", shape.triangledown, location.abovebar, color.red, size=size.small)
+
+// Background for trend
+bgcolor(bullish ? color.new(color.green, 95) : bearish ? color.new(color.red, 95) : na)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// INFO PANEL
+// ══════════════════════════════════════════════════════════════════════════════
+
+var table panel = table.new(position.top_right, 2, 6, bgcolor=color.new(color.black, 80))
+if barstate.islast
+    table.cell(panel, 0, 0, "SCALPER", text_color=color.yellow, bgcolor=color.new(color.blue, 60))
+    table.cell(panel, 1, 0, "ACTIVE", text_color=color.white, bgcolor=color.new(color.blue, 60))
+
+    table.cell(panel, 0, 1, "Trend", text_color=color.white)
+    table.cell(panel, 1, 1, bullish ? "LONG" : "SHORT", text_color=bullish ? color.green : color.red)
+
+    table.cell(panel, 0, 2, "RSI", text_color=color.white)
+    table.cell(panel, 1, 2, str.tostring(rsi, "#.#"), text_color=rsi > rsiHigh ? color.green : rsi < rsiLow ? color.red : color.white)
+
+    table.cell(panel, 0, 3, "vs VWAP", text_color=color.white)
+    table.cell(panel, 1, 3, close > vwapValue ? "ABOVE" : "BELOW", text_color=close > vwapValue ? color.green : color.red)
+
+    table.cell(panel, 0, 4, "SL Ticks", text_color=color.white)
+    table.cell(panel, 1, 4, str.tostring(slTicks), text_color=color.red)
+
+    table.cell(panel, 0, 5, "TP Ticks", text_color=color.white)
+    table.cell(panel, 1, 5, str.tostring(tpTicks), text_color=color.green)

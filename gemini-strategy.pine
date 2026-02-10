@@ -1,0 +1,75 @@
+//@version=5
+strategy("Gemini Momentum Strategy", shorttitle="GMS", overlay=true,
+         pyramiding=0, initial_capital=10000, currency=currency.USD,
+         default_qty_type=strategy.percent_of_equity, default_qty_value=10,
+         commission_type=strategy.commission.percent, commission_value=0.1)
+
+// --- Strategy Inputs ---
+// MACD
+fast_length = input.int(12, title="MACD Fast Length")
+slow_length = input.int(26, title="MACD Slow Length")
+signal_length = input.int(9, title="MACD Signal Length")
+
+// RSI
+rsi_length = input.int(14, title="RSI Length")
+rsi_oversold = input.int(30, title="RSI Oversold Level")
+rsi_overbought = input.int(70, title="RSI Overbought Level")
+rsi_middle = input.int(50, title="RSI Middle Line")
+
+// Stop Loss / Take Profit
+use_sl_tp = input.bool(true, title="Use Stop Loss & Take Profit")
+stop_loss_percent = input.float(1.5, title="Stop Loss (%)", minval=0.1, step=0.1) / 100
+take_profit_percent = input.float(3.0, title="Take Profit (%)", minval=0.1, step=0.1) / 100
+
+// --- Indicators ---
+// MACD
+[macd_line, signal_line, hist_line] = ta.macd(close, fast_length, slow_length, signal_length)
+
+// RSI
+rsi_value = ta.rsi(close, rsi_length)
+
+// --- Plot Indicators (Optional, for visualization) ---
+plot(macd_line, "MACD Line", color.blue)
+plot(signal_line, "Signal Line", color.orange)
+plot(hist_line, "Histogram", color = hist_line >= 0 ? (hist_line[1] < hist_line ? color.green : color.red) : (hist_line[1] < hist_line ? color.red : color.green), style = plot.style.columns)
+
+hline(0, "MACD Zero Line", color.gray)
+
+plot(rsi_value, "RSI", color.purple, display=display.pane)
+hline(rsi_oversold, "RSI Oversold", color.red, display=display.pane)
+hline(rsi_overbought, "RSI Overbought", color.green, display=display.pane)
+hline(rsi_middle, "RSI Middle", color.gray, display=display.pane)
+
+// --- Strategy Logic ---
+
+// Long Entry Condition: MACD bullish crossover AND RSI above 50
+long_entry_condition = ta.crossover(macd_line, signal_line) and rsi_value > rsi_middle
+if long_entry_condition
+    strategy.entry("Long", strategy.long)
+
+// Short Entry Condition: MACD bearish crossover AND RSI below 50
+short_entry_condition = ta.crossunder(macd_line, signal_line) and rsi_value < rsi_middle
+if short_entry_condition
+    strategy.entry("Short", strategy.short)
+
+// Long Exit Condition: MACD bearish crossover OR RSI crosses below 50
+long_exit_condition = ta.crossunder(macd_line, signal_line) or ta.crossunder(rsi_value, rsi_middle)
+if long_exit_condition
+    strategy.close("Long")
+
+// Short Exit Condition: MACD bullish crossover OR RSI crosses above 50
+short_exit_condition = ta.crossover(macd_line, signal_line) or ta.crossover(rsi_value, rsi_middle)
+if short_exit_condition
+    strategy.close("Short")
+
+// --- Stop Loss and Take Profit ---
+if use_sl_tp
+    if strategy.position_size > 0 // Currently long
+        long_stop_price = close * (1 - stop_loss_percent)
+        long_take_profit_price = close * (1 + take_profit_percent)
+        strategy.exit("Long SL/TP", from_entry="Long", stop=long_stop_price, limit=long_take_profit_price)
+
+    if strategy.position_size < 0 // Currently short
+        short_stop_price = close * (1 + stop_loss_percent)
+        short_take_profit_price = close * (1 - take_profit_percent)
+        strategy.exit("Short SL/TP", from_entry="Short", stop=short_stop_price, limit=short_take_profit_price)
