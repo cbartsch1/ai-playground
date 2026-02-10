@@ -24,7 +24,7 @@ isAggressive   = modeInput == "Aggressive"
 // ══════════════════════════════════════════════════════════════════════════════
 
 htfEmaLen = input.int(20, "HTF EMA Length", minval=10, maxval=50, step=5, group="HTF Bias")
-useHTF    = input.bool(true, "Require HTF Alignment", group="HTF Bias")
+useHTF    = input.bool(true, "Require HTF Alignment", group="HTF Bias")  // ON by default — key directional filter
 
 htfEma = request.security(syminfo.tickerid, "15", ta.ema(close, htfEmaLen), lookahead=barmerge.lookahead_off)
 htfBullish = close > htfEma
@@ -36,12 +36,36 @@ htfBearish = close < htfEma
 
 emaFast = input.int(5, "Fast EMA", minval=3, maxval=8, step=1, group="EMA Trigger")
 emaSlow = input.int(10, "Slow EMA", minval=8, maxval=15, step=1, group="EMA Trigger")
+usePullback  = input.bool(true, "Enable Pullback Re-entry", group="EMA Trigger")
+cooldownBars = input.int(6, "Cooldown Bars After Exit", minval=1, maxval=15, step=1, group="EMA Trigger")
 
 ema5  = ta.ema(close, emaFast)
 ema10 = ta.ema(close, emaSlow)
 
+// Primary trigger: EMA crossover
 longCross  = ta.crossover(ema5, ema10)
 shortCross = ta.crossunder(ema5, ema10)
+
+// Secondary trigger: Pullback to slow EMA while trend is aligned
+// Long pullback: EMAs bullish, price dipped to/below slow EMA last bar, now closing above it
+// Deeper pullback = higher quality re-entry
+emasBullish    = ema5 > ema10
+emasBearish    = ema5 < ema10
+longPullback   = usePullback and emasBullish and low[1] <= ema10[1] and close > ema10
+shortPullback  = usePullback and emasBearish and high[1] >= ema10[1] and close < ema10
+
+// Cooldown: track bars since last exit to avoid churning
+var int barsSinceExit = 100
+if strategy.position_size == 0 and strategy.position_size[1] != 0
+    barsSinceExit := 0
+else if strategy.position_size == 0
+    barsSinceExit += 1
+
+pastCooldown = barsSinceExit >= cooldownBars
+
+// Combined triggers
+longTrigger  = (longCross or longPullback) and pastCooldown
+shortTrigger = (shortCross or shortPullback) and pastCooldown
 
 // ══════════════════════════════════════════════════════════════════════════════
 // ICHIMOKU CLOUD (from Ichimoku RSI v2)
@@ -72,17 +96,17 @@ cloudBearish = senkouA < senkouB
 // Gate 1: HTF EMA direction (already defined above with useHTF)
 
 // Gate 2: Cloud alignment
-useCloud = input.bool(true, "Require Cloud Alignment", group="Gates")
+useCloud = input.bool(false, "Require Cloud Alignment", group="Gates")
 priceAboveCloud = close > cloudTop
 priceBelowCloud = close < cloudBottom
 
 // Gate 3: Cloud thickness minimum
-useCloudThick   = input.bool(true, "Require Cloud Thickness", group="Gates")
-minCloudTicks   = input.float(5, "Min Cloud Thickness (ticks)", minval=2, maxval=10, step=1, group="Gates")
+useCloudThick   = input.bool(false, "Require Cloud Thickness", group="Gates")
+minCloudTicks   = input.float(3, "Min Cloud Thickness (ticks)", minval=2, maxval=10, step=1, group="Gates")
 cloudThickEnough = cloudThickness >= minCloudTicks
 
 // Gate 4: Chikou confirmation
-useChikou = input.bool(true, "Require Chikou Confirmation", group="Gates")
+useChikou = input.bool(false, "Require Chikou Confirmation", group="Gates")
 chikouAbove = close > close[displacement]
 chikouBelow = close < close[displacement]
 
@@ -95,11 +119,11 @@ rsiShortEntry = input.int(50, "RSI Short Max", minval=40, maxval=60, step=5, gro
 rsi = ta.rsi(close, rsiLen)
 
 // Apply mode overrides for RSI
-rsiLongThresh  = isConservative ? 55 : isAggressive ? 45 : rsiLongEntry
-rsiShortThresh = isConservative ? 45 : isAggressive ? 55 : rsiShortEntry
+rsiLongThresh  = isConservative ? 55 : isAggressive ? 40 : rsiLongEntry
+rsiShortThresh = isConservative ? 45 : isAggressive ? 60 : rsiShortEntry
 
 // Gate 6: VWAP alignment (from Proven Scalper)
-useVWAP = input.bool(true, "Require VWAP Alignment", group="Gates")
+useVWAP = input.bool(false, "Require VWAP Alignment", group="Gates")
 vwap = ta.vwap(hlc3)
 
 // Gate 7: Session (from Proven Scalper - split morning/afternoon)
@@ -117,14 +141,14 @@ inSession   = inMorning or inAfternoon
 // MODE-BASED GATE OVERRIDES
 // ══════════════════════════════════════════════════════════════════════════════
 
-// Conservative: all gates required regardless of toggle
-// Moderate: user toggles respected
-// Aggressive: most gates disabled unless user forces them on
-gateHTF        = isConservative ? true : isAggressive ? false : useHTF
-gateCloud      = isConservative ? true : isAggressive ? false : useCloud
-gateCloudThick = isConservative ? true : isAggressive ? false : useCloudThick
-gateChikou     = isConservative ? true : isAggressive ? false : useChikou
-gateVWAP       = isConservative ? true : isAggressive ? false : useVWAP
+// Conservative: all gates forced ON
+// Moderate: respects user toggles (defaults: HTF on, cloud/chikou/VWAP off)
+// Aggressive: all gates forced OFF — only EMA cross + RSI + session
+gateHTF        = isConservative ? true  : isAggressive ? false : useHTF
+gateCloud      = isConservative ? true  : isAggressive ? false : useCloud
+gateCloudThick = isConservative ? true  : isAggressive ? false : useCloudThick
+gateChikou     = isConservative ? true  : isAggressive ? false : useChikou
+gateVWAP       = isConservative ? true  : isAggressive ? false : useVWAP
 
 // ══════════════════════════════════════════════════════════════════════════════
 // ENTRY SIGNALS - EMA cross is trigger, then pass all active gates
@@ -138,7 +162,7 @@ passChikou_L     = not gateChikou or chikouAbove
 passRSI_L        = rsi > rsiLongThresh
 passVWAP_L       = not gateVWAP or close > vwap
 
-longSignal = longCross and passHTF_L and passCloud_L and passCloudThick_L and passChikou_L and passRSI_L and passVWAP_L and inSession and strategy.position_size == 0
+longSignal = longTrigger and passHTF_L and passCloud_L and passCloudThick_L and passChikou_L and passRSI_L and passVWAP_L and inSession and strategy.position_size == 0
 
 // SHORT gates
 passHTF_S        = not gateHTF or htfBearish
@@ -148,49 +172,40 @@ passChikou_S     = not gateChikou or chikouBelow
 passRSI_S        = rsi < rsiShortThresh
 passVWAP_S       = not gateVWAP or close < vwap
 
-shortSignal = shortCross and passHTF_S and passCloud_S and passCloudThick_S and passChikou_S and passRSI_S and passVWAP_S and inSession and strategy.position_size == 0
+shortSignal = shortTrigger and passHTF_S and passCloud_S and passCloudThick_S and passChikou_S and passRSI_S and passVWAP_S and inSession and strategy.position_size == 0
 
 // ══════════════════════════════════════════════════════════════════════════════
 // SMART EXITS
 // ══════════════════════════════════════════════════════════════════════════════
 
-// Risk inputs with mode-dependent defaults
-slTicksInput = input.float(6,  "Fixed SL Ticks",        minval=3,  maxval=10, step=1, group="Smart Exits")
-tpTicksInput = input.float(10, "Fixed TP Ceiling Ticks", minval=6,  maxval=20, step=2, group="Smart Exits")
+// Risk inputs — sized for 5m ES (1 tick = 0.25 pts = $12.50)
+// 20 ticks = 5 pts = $250 SL, 28 ticks = 7 pts = $350 TP
+slTicksInput = input.float(20, "Fixed SL Ticks",        minval=12, maxval=32, step=4, group="Smart Exits")
+tpTicksInput = input.float(28, "Fixed TP Ceiling Ticks", minval=16, maxval=48, step=4, group="Smart Exits")
 kijunBuffer  = input.float(2,  "Kijun Stop Buffer",     minval=1,  maxval=4,  step=1, group="Smart Exits")
-maxStopDist  = input.float(8,  "Max Stop Distance",     minval=4,  maxval=12, step=1, group="Smart Exits",
+maxStopDist  = input.float(24, "Max Stop Distance",     minval=12, maxval=32, step=4, group="Smart Exits",
                  tooltip="Clamps Kijun stop so it's never farther than this many ticks from entry")
 
-// Mode overrides for SL/TP
-slTicks = isConservative ? slTicksInput - 1 : isAggressive ? slTicksInput + 1 : slTicksInput
-tpTicks = isConservative ? tpTicksInput - 2 : isAggressive ? tpTicksInput + 4 : tpTicksInput
-
-// Kijun trailing stop with max distance clamp
-kijunStopLong  = kijun - (kijunBuffer * tick)
-kijunStopShort = kijun + (kijunBuffer * tick)
-
-// Clamp: don't let Kijun stop be farther than maxStopDist ticks from current price
-kijunStopLongClamped  = math.max(kijunStopLong, close - maxStopDist * tick)
-kijunStopShortClamped = math.min(kijunStopShort, close + maxStopDist * tick)
+// Mode overrides for SL/TP (scaled for 5m)
+slTicks = isConservative ? slTicksInput - 4 : isAggressive ? slTicksInput + 4 : slTicksInput
+tpTicks = isConservative ? tpTicksInput - 4 : isAggressive ? tpTicksInput + 8 : tpTicksInput
 
 // ══════════════════════════════════════════════════════════════════════════════
 // EXECUTION
 // ══════════════════════════════════════════════════════════════════════════════
 
+// Use built-in loss/profit (in ticks from fill price) — guaranteed accurate
+// These fire immediately from actual entry price, no manual calculation needed
 if longSignal
     strategy.entry("L", strategy.long)
-    strategy.exit("LX", "L", stop=kijunStopLongClamped, limit=close + tpTicks * tick)
+    strategy.exit("LX", "L", loss=slTicks, profit=tpTicks)
 
 if shortSignal
     strategy.entry("S", strategy.short)
-    strategy.exit("SX", "S", stop=kijunStopShortClamped, limit=close - tpTicks * tick)
+    strategy.exit("SX", "S", loss=slTicks, profit=tpTicks)
 
-// Update Kijun trailing stop each bar while in position
-if strategy.position_size > 0
-    strategy.exit("LX", "L", stop=kijunStopLongClamped, limit=close + tpTicks * tick)
-
-if strategy.position_size < 0
-    strategy.exit("SX", "S", stop=kijunStopShortClamped, limit=close - tpTicks * tick)
+// Fixed loss/profit stops handle all risk management
+// Kijun trailing can be re-enabled later once base strategy is profitable
 
 // Session flatten at morning end and afternoon end
 if (timeNow >= sessEnd and timeNow < sessStart2) or timeNow >= sessEnd2
@@ -223,9 +238,16 @@ plot(close, "Chikou", color.new(color.purple, 30), 1, offset=-displacement)
 // VWAP
 plot(vwap, "VWAP", color.white, 1)
 
-// Signals
-plotshape(longSignal, "Long", shape.triangleup, location.belowbar, color.lime, size=size.small)
-plotshape(shortSignal, "Short", shape.triangledown, location.abovebar, color.red, size=size.small)
+// Signals — diamond for pullback, triangle for crossover
+longIsCross = longSignal and longCross
+longIsPull  = longSignal and not longCross
+shortIsCross = shortSignal and shortCross
+shortIsPull  = shortSignal and not shortCross
+
+plotshape(longIsCross, "Long Cross", shape.triangleup, location.belowbar, color.lime, size=size.small)
+plotshape(longIsPull, "Long Pull", shape.diamond, location.belowbar, color.aqua, size=size.small)
+plotshape(shortIsCross, "Short Cross", shape.triangledown, location.abovebar, color.red, size=size.small)
+plotshape(shortIsPull, "Short Pull", shape.diamond, location.abovebar, color.orange, size=size.small)
 
 // Background - session and bias
 bgcolor(not inSession ? color.new(color.gray, 90) : htfBullish ? color.new(color.green, 95) : htfBearish ? color.new(color.red, 95) : na)
