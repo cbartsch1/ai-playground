@@ -1,0 +1,145 @@
+// Proven ES Scalper - Optimization Ready
+// Based on backtested research with full parameter sweep ranges
+// All inputs have minval/maxval/step for TradingView Strategy Tester optimization
+// FIXED: lookahead_off for accurate backtesting (no future data leak)
+//@version=5
+strategy("Proven Scalper OPT", shorttitle="PROVEN-OPT", overlay=true,
+         pyramiding=0, initial_capital=10000, currency=currency.USD,
+         default_qty_type=strategy.fixed, default_qty_value=1,
+         commission_type=strategy.commission.cash_per_contract, commission_value=2.50,
+         slippage=1)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// HIGHER TF BIAS
+// ══════════════════════════════════════════════════════════════════════════════
+
+htfEmaLen = input.int(20, "HTF EMA Length", minval=10, maxval=50, step=5, group="Higher TF Bias")
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ENTRY
+// ══════════════════════════════════════════════════════════════════════════════
+
+emaFast = input.int(5, "Fast EMA", minval=3, maxval=8, step=1, group="Entry")
+emaSlow = input.int(10, "Slow EMA", minval=8, maxval=15, step=1, group="Entry")
+
+// ══════════════════════════════════════════════════════════════════════════════
+// RSI
+// ══════════════════════════════════════════════════════════════════════════════
+
+rsiLen = input.int(7, "RSI Length", minval=5, maxval=14, step=1, group="RSI")
+rsiMid = input.int(50, "RSI Midline", minval=40, maxval=60, step=5, group="RSI")
+
+// ══════════════════════════════════════════════════════════════════════════════
+// RISK - Research backed: Small targets, tight stops
+// ══════════════════════════════════════════════════════════════════════════════
+
+slTicks = input.float(5, "Stop Loss Ticks", minval=3, maxval=8, step=1, group="Risk")
+tpTicks = input.float(6, "Take Profit Ticks", minval=4, maxval=10, step=1, group="Risk")
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SESSION - Focus on high volume times
+// ══════════════════════════════════════════════════════════════════════════════
+
+sessStart  = input.int(935,  "Morning Start",     minval=900,  maxval=1000, step=5,  group="Session")
+sessEnd    = input.int(1145, "Morning End",        minval=1100, maxval=1200, step=15, group="Session")
+sessStart2 = input.int(1400, "Afternoon Start",    minval=1330, maxval=1430, step=15, group="Session")
+sessEnd2   = input.int(1545, "Afternoon End",      minval=1500, maxval=1600, step=15, group="Session")
+
+// ══════════════════════════════════════════════════════════════════════════════
+// HIGHER TIMEFRAME BIAS - 15m EMA (lookahead OFF for accurate backtesting)
+// ══════════════════════════════════════════════════════════════════════════════
+
+htfEma = request.security(syminfo.tickerid, "15", ta.ema(close, htfEmaLen), lookahead=barmerge.lookahead_off)
+htfBullish = close > htfEma
+htfBearish = close < htfEma
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ENTRY INDICATORS
+// ══════════════════════════════════════════════════════════════════════════════
+
+ema5 = ta.ema(close, emaFast)
+ema10 = ta.ema(close, emaSlow)
+rsi = ta.rsi(close, rsiLen)
+vwap = ta.vwap(hlc3)
+
+// Session check
+timeNow = hour * 100 + minute
+inMorning = timeNow >= sessStart and timeNow < sessEnd
+inAfternoon = timeNow >= sessStart2 and timeNow < sessEnd2
+inSession = inMorning or inAfternoon
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ENTRY SIGNALS
+// ══════════════════════════════════════════════════════════════════════════════
+
+longCross = ta.crossover(ema5, ema10)
+longHTF = htfBullish
+longRSI = rsi > rsiMid
+longVWAP = close > vwap
+
+longSignal = longCross and longHTF and longRSI and longVWAP and inSession and strategy.position_size == 0
+
+shortCross = ta.crossunder(ema5, ema10)
+shortHTF = htfBearish
+shortRSI = rsi < rsiMid
+shortVWAP = close < vwap
+
+shortSignal = shortCross and shortHTF and shortRSI and shortVWAP and inSession and strategy.position_size == 0
+
+// ══════════════════════════════════════════════════════════════════════════════
+// EXECUTION
+// ══════════════════════════════════════════════════════════════════════════════
+
+tick = syminfo.mintick
+
+if longSignal
+    strategy.entry("L", strategy.long)
+    strategy.exit("LX", "L", stop=close - slTicks*tick, limit=close + tpTicks*tick)
+
+if shortSignal
+    strategy.entry("S", strategy.short)
+    strategy.exit("SX", "S", stop=close + slTicks*tick, limit=close - tpTicks*tick)
+
+// Flatten at session end
+if (timeNow >= sessEnd and timeNow < sessStart2) or timeNow >= sessEnd2
+    if strategy.position_size != 0
+        strategy.close_all("Session End")
+
+// ══════════════════════════════════════════════════════════════════════════════
+// VISUALS
+// ══════════════════════════════════════════════════════════════════════════════
+
+plot(ema5, "EMA Fast", color.lime, 1)
+plot(ema10, "EMA Slow", color.red, 1)
+plot(htfEma, "15m EMA", color.yellow, 2)
+plot(vwap, "VWAP", color.white, 1)
+
+plotshape(longSignal, "Long", shape.triangleup, location.belowbar, color.lime, size=size.small)
+plotshape(shortSignal, "Short", shape.triangledown, location.abovebar, color.red, size=size.small)
+
+bgcolor(htfBullish ? color.new(color.green, 95) : htfBearish ? color.new(color.red, 95) : na)
+bgcolor(not inSession ? color.new(color.gray, 90) : na, title="No Trade Zone")
+
+// ══════════════════════════════════════════════════════════════════════════════
+// INFO PANEL
+// ══════════════════════════════════════════════════════════════════════════════
+
+var table t = table.new(position.top_right, 2, 6, bgcolor=color.new(color.black, 75))
+if barstate.islast
+    table.cell(t, 0, 0, "PROVEN-OPT", text_color=color.black, bgcolor=color.lime)
+    table.cell(t, 1, 0, htfBullish ? "LONG ONLY" : "SHORT ONLY", text_color=color.black, bgcolor=htfBullish ? color.lime : color.red)
+
+    table.cell(t, 0, 1, "15m Bias", text_color=color.white)
+    table.cell(t, 1, 1, htfBullish ? "BULL" : "BEAR", text_color=htfBullish ? color.lime : color.red)
+
+    table.cell(t, 0, 2, "VWAP", text_color=color.white)
+    table.cell(t, 1, 2, close > vwap ? "ABOVE" : "BELOW", text_color=close > vwap ? color.lime : color.red)
+
+    table.cell(t, 0, 3, "RSI", text_color=color.white)
+    table.cell(t, 1, 3, str.tostring(rsi, "#"), text_color=rsi > rsiMid ? color.lime : color.red)
+
+    table.cell(t, 0, 4, "Session", text_color=color.white)
+    table.cell(t, 1, 4, inSession ? "ACTIVE" : "CLOSED", text_color=inSession ? color.lime : color.red)
+
+    table.cell(t, 0, 5, "Risk", text_color=color.white)
+    table.cell(t, 1, 5, str.tostring(slTicks, "#") + "/" + str.tostring(tpTicks, "#") + "t", text_color=color.aqua)

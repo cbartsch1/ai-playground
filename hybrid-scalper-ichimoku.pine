@@ -1,0 +1,291 @@
+// Hybrid Scalper-Ichimoku Strategy
+// Combines: Proven Scalper (HTF EMA, VWAP, EMA crossover, split sessions)
+//         + Ichimoku RSI v2 (Cloud filter, Chikou confirmation, Kijun trailing stop)
+// For ES 5m chart with mode selector (Conservative / Moderate / Aggressive)
+// All inputs optimizable with minval/maxval/step
+//@version=5
+strategy("Hybrid Scalper-Ichimoku", shorttitle="HYBRID", overlay=true,
+         pyramiding=0, initial_capital=10000, currency=currency.USD,
+         default_qty_type=strategy.fixed, default_qty_value=1,
+         commission_type=strategy.commission.cash_per_contract, commission_value=2.50,
+         slippage=1)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// MODE SELECTOR
+// ══════════════════════════════════════════════════════════════════════════════
+
+modeInput = input.string("Moderate", "Trading Mode", options=["Conservative", "Moderate", "Aggressive"], group="Mode")
+isConservative = modeInput == "Conservative"
+isModerate     = modeInput == "Moderate"
+isAggressive   = modeInput == "Aggressive"
+
+// ══════════════════════════════════════════════════════════════════════════════
+// HTF BIAS (from Proven Scalper) - lookahead OFF
+// ══════════════════════════════════════════════════════════════════════════════
+
+htfEmaLen = input.int(20, "HTF EMA Length", minval=10, maxval=50, step=5, group="HTF Bias")
+useHTF    = input.bool(true, "Require HTF Alignment", group="HTF Bias")
+
+htfEma = request.security(syminfo.tickerid, "15", ta.ema(close, htfEmaLen), lookahead=barmerge.lookahead_off)
+htfBullish = close > htfEma
+htfBearish = close < htfEma
+
+// ══════════════════════════════════════════════════════════════════════════════
+// EMA CROSSOVER TRIGGER (from Proven Scalper)
+// ══════════════════════════════════════════════════════════════════════════════
+
+emaFast = input.int(5, "Fast EMA", minval=3, maxval=8, step=1, group="EMA Trigger")
+emaSlow = input.int(10, "Slow EMA", minval=8, maxval=15, step=1, group="EMA Trigger")
+
+ema5  = ta.ema(close, emaFast)
+ema10 = ta.ema(close, emaSlow)
+
+longCross  = ta.crossover(ema5, ema10)
+shortCross = ta.crossunder(ema5, ema10)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ICHIMOKU CLOUD (from Ichimoku RSI v2)
+// ══════════════════════════════════════════════════════════════════════════════
+
+tenkanLen    = input.int(9,  "Tenkan",       minval=7,  maxval=13, step=2, group="Ichimoku")
+kijunLen     = input.int(26, "Kijun",        minval=18, maxval=34, step=4, group="Ichimoku")
+senkouBLen   = input.int(52, "Senkou B",     minval=36, maxval=68, step=8, group="Ichimoku")
+displacement = input.int(26, "Displacement", minval=18, maxval=34, step=4, group="Ichimoku")
+
+tenkan  = (ta.highest(high, tenkanLen) + ta.lowest(low, tenkanLen)) / 2
+kijun   = (ta.highest(high, kijunLen) + ta.lowest(low, kijunLen)) / 2
+senkouA = (tenkan + kijun) / 2
+senkouB = (ta.highest(high, senkouBLen) + ta.lowest(low, senkouBLen)) / 2
+
+cloudTop    = math.max(senkouA, senkouB)
+cloudBottom = math.min(senkouA, senkouB)
+tick        = syminfo.mintick
+cloudThickness = (cloudTop - cloudBottom) / tick
+
+cloudBullish = senkouA > senkouB
+cloudBearish = senkouA < senkouB
+
+// ══════════════════════════════════════════════════════════════════════════════
+// TOGGLEABLE GATES
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Gate 1: HTF EMA direction (already defined above with useHTF)
+
+// Gate 2: Cloud alignment
+useCloud = input.bool(true, "Require Cloud Alignment", group="Gates")
+priceAboveCloud = close > cloudTop
+priceBelowCloud = close < cloudBottom
+
+// Gate 3: Cloud thickness minimum
+useCloudThick   = input.bool(true, "Require Cloud Thickness", group="Gates")
+minCloudTicks   = input.float(5, "Min Cloud Thickness (ticks)", minval=2, maxval=10, step=1, group="Gates")
+cloudThickEnough = cloudThickness >= minCloudTicks
+
+// Gate 4: Chikou confirmation
+useChikou = input.bool(true, "Require Chikou Confirmation", group="Gates")
+chikouAbove = close > close[displacement]
+chikouBelow = close < close[displacement]
+
+// Gate 5: RSI in zone
+rsiLen = input.int(7, "RSI Length", minval=5, maxval=14, step=1, group="RSI")
+// Mode-dependent defaults applied via ternary
+rsiLongEntry  = input.int(50, "RSI Long Min",  minval=40, maxval=60, step=5, group="RSI")
+rsiShortEntry = input.int(50, "RSI Short Max", minval=40, maxval=60, step=5, group="RSI")
+
+rsi = ta.rsi(close, rsiLen)
+
+// Apply mode overrides for RSI
+rsiLongThresh  = isConservative ? 55 : isAggressive ? 45 : rsiLongEntry
+rsiShortThresh = isConservative ? 45 : isAggressive ? 55 : rsiShortEntry
+
+// Gate 6: VWAP alignment (from Proven Scalper)
+useVWAP = input.bool(true, "Require VWAP Alignment", group="Gates")
+vwap = ta.vwap(hlc3)
+
+// Gate 7: Session (from Proven Scalper - split morning/afternoon)
+sessStart  = input.int(935,  "Morning Start",  minval=900,  maxval=1000, step=5,  group="Session")
+sessEnd    = input.int(1145, "Morning End",     minval=1100, maxval=1200, step=15, group="Session")
+sessStart2 = input.int(1400, "Afternoon Start", minval=1330, maxval=1430, step=15, group="Session")
+sessEnd2   = input.int(1545, "Afternoon End",   minval=1500, maxval=1600, step=15, group="Session")
+
+timeNow     = hour * 100 + minute
+inMorning   = timeNow >= sessStart and timeNow < sessEnd
+inAfternoon = timeNow >= sessStart2 and timeNow < sessEnd2
+inSession   = inMorning or inAfternoon
+
+// ══════════════════════════════════════════════════════════════════════════════
+// MODE-BASED GATE OVERRIDES
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Conservative: all gates required regardless of toggle
+// Moderate: user toggles respected
+// Aggressive: most gates disabled unless user forces them on
+gateHTF        = isConservative ? true : isAggressive ? false : useHTF
+gateCloud      = isConservative ? true : isAggressive ? false : useCloud
+gateCloudThick = isConservative ? true : isAggressive ? false : useCloudThick
+gateChikou     = isConservative ? true : isAggressive ? false : useChikou
+gateVWAP       = isConservative ? true : isAggressive ? false : useVWAP
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ENTRY SIGNALS - EMA cross is trigger, then pass all active gates
+// ══════════════════════════════════════════════════════════════════════════════
+
+// LONG gates
+passHTF_L        = not gateHTF or htfBullish
+passCloud_L      = not gateCloud or (priceAboveCloud and cloudBullish)
+passCloudThick_L = not gateCloudThick or cloudThickEnough
+passChikou_L     = not gateChikou or chikouAbove
+passRSI_L        = rsi > rsiLongThresh
+passVWAP_L       = not gateVWAP or close > vwap
+
+longSignal = longCross and passHTF_L and passCloud_L and passCloudThick_L and passChikou_L and passRSI_L and passVWAP_L and inSession and strategy.position_size == 0
+
+// SHORT gates
+passHTF_S        = not gateHTF or htfBearish
+passCloud_S      = not gateCloud or (priceBelowCloud and cloudBearish)
+passCloudThick_S = not gateCloudThick or cloudThickEnough
+passChikou_S     = not gateChikou or chikouBelow
+passRSI_S        = rsi < rsiShortThresh
+passVWAP_S       = not gateVWAP or close < vwap
+
+shortSignal = shortCross and passHTF_S and passCloud_S and passCloudThick_S and passChikou_S and passRSI_S and passVWAP_S and inSession and strategy.position_size == 0
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SMART EXITS
+// ══════════════════════════════════════════════════════════════════════════════
+
+// Risk inputs with mode-dependent defaults
+slTicksInput = input.float(6,  "Fixed SL Ticks",        minval=3,  maxval=10, step=1, group="Smart Exits")
+tpTicksInput = input.float(10, "Fixed TP Ceiling Ticks", minval=6,  maxval=20, step=2, group="Smart Exits")
+kijunBuffer  = input.float(2,  "Kijun Stop Buffer",     minval=1,  maxval=4,  step=1, group="Smart Exits")
+maxStopDist  = input.float(8,  "Max Stop Distance",     minval=4,  maxval=12, step=1, group="Smart Exits",
+                 tooltip="Clamps Kijun stop so it's never farther than this many ticks from entry")
+
+// Mode overrides for SL/TP
+slTicks = isConservative ? slTicksInput - 1 : isAggressive ? slTicksInput + 1 : slTicksInput
+tpTicks = isConservative ? tpTicksInput - 2 : isAggressive ? tpTicksInput + 4 : tpTicksInput
+
+// Kijun trailing stop with max distance clamp
+kijunStopLong  = kijun - (kijunBuffer * tick)
+kijunStopShort = kijun + (kijunBuffer * tick)
+
+// Clamp: don't let Kijun stop be farther than maxStopDist ticks from current price
+kijunStopLongClamped  = math.max(kijunStopLong, close - maxStopDist * tick)
+kijunStopShortClamped = math.min(kijunStopShort, close + maxStopDist * tick)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// EXECUTION
+// ══════════════════════════════════════════════════════════════════════════════
+
+if longSignal
+    strategy.entry("L", strategy.long)
+    strategy.exit("LX", "L", stop=kijunStopLongClamped, limit=close + tpTicks * tick)
+
+if shortSignal
+    strategy.entry("S", strategy.short)
+    strategy.exit("SX", "S", stop=kijunStopShortClamped, limit=close - tpTicks * tick)
+
+// Update Kijun trailing stop each bar while in position
+if strategy.position_size > 0
+    strategy.exit("LX", "L", stop=kijunStopLongClamped, limit=close + tpTicks * tick)
+
+if strategy.position_size < 0
+    strategy.exit("SX", "S", stop=kijunStopShortClamped, limit=close - tpTicks * tick)
+
+// Session flatten at morning end and afternoon end
+if (timeNow >= sessEnd and timeNow < sessStart2) or timeNow >= sessEnd2
+    if strategy.position_size != 0
+        strategy.close_all("Session End")
+
+// ══════════════════════════════════════════════════════════════════════════════
+// VISUALS
+// ══════════════════════════════════════════════════════════════════════════════
+
+// EMAs
+plot(ema5, "EMA Fast", color.lime, 1)
+plot(ema10, "EMA Slow", color.red, 1)
+
+// HTF EMA
+plot(htfEma, "15m EMA", color.yellow, 2)
+
+// Ichimoku lines
+plot(tenkan, "Tenkan", color.new(color.blue, 30), 1)
+plot(kijun, "Kijun", color.new(color.red, 30), 2)
+
+// Cloud
+p1 = plot(senkouA[displacement], "Senkou A", color.new(color.green, 60), 1)
+p2 = plot(senkouB[displacement], "Senkou B", color.new(color.red, 60), 1)
+fill(p1, p2, color=senkouA[displacement] > senkouB[displacement] ? color.new(color.green, 85) : color.new(color.red, 85))
+
+// Chikou
+plot(close, "Chikou", color.new(color.purple, 30), 1, offset=-displacement)
+
+// VWAP
+plot(vwap, "VWAP", color.white, 1)
+
+// Signals
+plotshape(longSignal, "Long", shape.triangleup, location.belowbar, color.lime, size=size.small)
+plotshape(shortSignal, "Short", shape.triangledown, location.abovebar, color.red, size=size.small)
+
+// Background - session and bias
+bgcolor(not inSession ? color.new(color.gray, 90) : htfBullish ? color.new(color.green, 95) : htfBearish ? color.new(color.red, 95) : na)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// INFO PANEL - 10 rows
+// ══════════════════════════════════════════════════════════════════════════════
+
+var table t = table.new(position.top_right, 2, 10, bgcolor=color.new(color.black, 75))
+if barstate.islast
+    // Row 0: Mode
+    modeColor = isConservative ? color.blue : isAggressive ? color.red : color.orange
+    table.cell(t, 0, 0, "HYBRID", text_color=color.black, bgcolor=modeColor)
+    table.cell(t, 1, 0, modeInput, text_color=color.black, bgcolor=modeColor)
+
+    // Row 1: HTF Bias
+    table.cell(t, 0, 1, "HTF Bias", text_color=color.white)
+    htfText = not gateHTF ? "OFF" : htfBullish ? "BULL" : "BEAR"
+    htfColor = not gateHTF ? color.gray : htfBullish ? color.lime : color.red
+    table.cell(t, 1, 1, htfText, text_color=htfColor)
+
+    // Row 2: Cloud Position
+    posVsCloud = close > cloudTop ? "ABOVE" : close < cloudBottom ? "BELOW" : "IN"
+    cloudPosColor = close > cloudTop ? color.lime : close < cloudBottom ? color.red : color.gray
+    table.cell(t, 0, 2, "Cloud", text_color=color.white)
+    table.cell(t, 1, 2, not gateCloud ? "OFF" : posVsCloud, text_color=not gateCloud ? color.gray : cloudPosColor)
+
+    // Row 3: Cloud Thickness
+    table.cell(t, 0, 3, "Thick", text_color=color.white)
+    thickText = not gateCloudThick ? "OFF" : str.tostring(cloudThickness, "#") + "t"
+    thickColor = not gateCloudThick ? color.gray : cloudThickEnough ? color.lime : color.red
+    table.cell(t, 1, 3, thickText, text_color=thickColor)
+
+    // Row 4: Chikou
+    table.cell(t, 0, 4, "Chikou", text_color=color.white)
+    chikouText = not gateChikou ? "OFF" : chikouAbove ? "ABOVE" : "BELOW"
+    chikouColor = not gateChikou ? color.gray : chikouAbove ? color.lime : color.red
+    table.cell(t, 1, 4, chikouText, text_color=chikouColor)
+
+    // Row 5: VWAP
+    table.cell(t, 0, 5, "VWAP", text_color=color.white)
+    vwapText = not gateVWAP ? "OFF" : close > vwap ? "ABOVE" : "BELOW"
+    vwapColor = not gateVWAP ? color.gray : close > vwap ? color.lime : color.red
+    table.cell(t, 1, 5, vwapText, text_color=vwapColor)
+
+    // Row 6: RSI
+    table.cell(t, 0, 6, "RSI", text_color=color.white)
+    rsiColor = rsi > rsiLongThresh ? color.lime : rsi < rsiShortThresh ? color.red : color.white
+    table.cell(t, 1, 6, str.tostring(rsi, "#"), text_color=rsiColor)
+
+    // Row 7: Stop Type
+    table.cell(t, 0, 7, "Stop", text_color=color.white)
+    table.cell(t, 1, 7, "KIJUN+" + str.tostring(kijunBuffer, "#") + "t", text_color=color.yellow)
+
+    // Row 8: Risk
+    table.cell(t, 0, 8, "Risk", text_color=color.white)
+    table.cell(t, 1, 8, str.tostring(slTicks, "#") + "/" + str.tostring(tpTicks, "#") + "t", text_color=color.aqua)
+
+    // Row 9: Session
+    table.cell(t, 0, 9, "Session", text_color=color.white)
+    sessText = inMorning ? "AM" : inAfternoon ? "PM" : "CLOSED"
+    sessColor = inSession ? color.lime : color.red
+    table.cell(t, 1, 9, sessText, text_color=sessColor)

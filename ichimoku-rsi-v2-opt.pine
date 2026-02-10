@@ -1,0 +1,194 @@
+// Ichimoku + RSI v2 - Optimization Ready
+// All inputs have minval/maxval/step for TradingView Strategy Tester optimization
+// For ES/NQ 5m charts
+//@version=5
+strategy("Ichimoku RSI v2 OPT", shorttitle="ICHI-V2-OPT", overlay=true,
+         pyramiding=0, initial_capital=10000, currency=currency.USD,
+         default_qty_type=strategy.fixed, default_qty_value=1,
+         commission_type=strategy.commission.cash_per_contract, commission_value=2.50,
+         slippage=1)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ICHIMOKU SETTINGS
+// ══════════════════════════════════════════════════════════════════════════════
+
+tenkanLen  = input.int(9,  "Tenkan",       minval=7,  maxval=13, step=2, group="Ichimoku")
+kijunLen   = input.int(26, "Kijun",        minval=18, maxval=34, step=4, group="Ichimoku")
+senkouBLen = input.int(52, "Senkou B",     minval=36, maxval=68, step=8, group="Ichimoku")
+displacement = input.int(26, "Displacement", minval=18, maxval=34, step=4, group="Ichimoku")
+
+// ══════════════════════════════════════════════════════════════════════════════
+// CLOUD FILTER
+// ══════════════════════════════════════════════════════════════════════════════
+
+useCloudFilter = input.bool(true, "Require Thick Cloud", group="Cloud Filter")
+minCloudTicks  = input.float(5, "Min Cloud Thickness (ticks)", minval=2, maxval=10, step=1, group="Cloud Filter")
+
+// ══════════════════════════════════════════════════════════════════════════════
+// RSI - TIGHTER THRESHOLDS
+// ══════════════════════════════════════════════════════════════════════════════
+
+rsiLen      = input.int(14, "RSI Length",    minval=7,  maxval=21, step=1, group="RSI")
+rsiLongMin  = input.int(55, "RSI Long Min",  minval=45, maxval=65, step=5, group="RSI")
+rsiLongMax  = input.int(75, "RSI Long Max",  minval=65, maxval=85, step=5, group="RSI")
+rsiShortMax = input.int(45, "RSI Short Max", minval=35, maxval=55, step=5, group="RSI")
+rsiShortMin = input.int(25, "RSI Short Min", minval=15, maxval=35, step=5, group="RSI")
+
+// ══════════════════════════════════════════════════════════════════════════════
+// RISK
+// ══════════════════════════════════════════════════════════════════════════════
+
+useKijunStop = input.bool(true, "Use Kijun as Stop", group="Risk")
+fixedSL      = input.float(12, "Fixed SL Ticks",       minval=8,  maxval=16, step=2, group="Risk")
+tpTicks      = input.float(24, "Take Profit Ticks",    minval=16, maxval=32, step=4, group="Risk")
+kijunBuffer  = input.float(2,  "Kijun Stop Buffer",    minval=1,  maxval=4,  step=1, group="Risk")
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SESSION
+// ══════════════════════════════════════════════════════════════════════════════
+
+useSession = input.bool(true, "Use Session", group="Session")
+sessStart  = input.int(940,  "Start", minval=900,  maxval=1000, step=5,  group="Session")
+sessEnd    = input.int(1545, "End",   minval=1500, maxval=1600, step=15, group="Session")
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ICHIMOKU CALCULATIONS
+// ══════════════════════════════════════════════════════════════════════════════
+
+tenkan = (ta.highest(high, tenkanLen) + ta.lowest(low, tenkanLen)) / 2
+kijun = (ta.highest(high, kijunLen) + ta.lowest(low, kijunLen)) / 2
+senkouA = (tenkan + kijun) / 2
+senkouB = (ta.highest(high, senkouBLen) + ta.lowest(low, senkouBLen)) / 2
+
+cloudTop = math.max(senkouA, senkouB)
+cloudBottom = math.min(senkouA, senkouB)
+
+tick = syminfo.mintick
+cloudThickness = (cloudTop - cloudBottom) / tick
+
+cloudBullish = senkouA > senkouB
+cloudBearish = senkouA < senkouB
+
+chikouAbove = close > close[displacement]
+chikouBelow = close < close[displacement]
+
+// ══════════════════════════════════════════════════════════════════════════════
+// RSI
+// ══════════════════════════════════════════════════════════════════════════════
+
+rsi = ta.rsi(close, rsiLen)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SESSION
+// ══════════════════════════════════════════════════════════════════════════════
+
+timeNow = hour * 100 + minute
+inSession = not useSession or (timeNow >= sessStart and timeNow < sessEnd)
+
+// ══════════════════════════════════════════════════════════════════════════════
+// ENTRY CONDITIONS
+// ══════════════════════════════════════════════════════════════════════════════
+
+// LONG
+tkCrossUp = ta.crossover(tenkan, kijun)
+priceAboveCloud = close > cloudTop
+cloudThickEnough = not useCloudFilter or cloudThickness >= minCloudTicks
+chikouConfirmLong = chikouAbove
+rsiBullish = rsi >= rsiLongMin and rsi <= rsiLongMax
+cloudIsGreen = cloudBullish
+
+longSignal = tkCrossUp and priceAboveCloud and cloudThickEnough and chikouConfirmLong and rsiBullish and cloudIsGreen and inSession and strategy.position_size == 0
+
+// SHORT
+tkCrossDown = ta.crossunder(tenkan, kijun)
+priceBelowCloud = close < cloudBottom
+chikouConfirmShort = chikouBelow
+rsiBearish = rsi <= rsiShortMax and rsi >= rsiShortMin
+cloudIsRed = cloudBearish
+
+shortSignal = tkCrossDown and priceBelowCloud and cloudThickEnough and chikouConfirmShort and rsiBearish and cloudIsRed and inSession and strategy.position_size == 0
+
+// ══════════════════════════════════════════════════════════════════════════════
+// STOP LOSS CALCULATION
+// ══════════════════════════════════════════════════════════════════════════════
+
+longStopKijun = kijun - (kijunBuffer * tick)
+shortStopKijun = kijun + (kijunBuffer * tick)
+
+longStopFixed = close - (fixedSL * tick)
+shortStopFixed = close + (fixedSL * tick)
+
+longStop = useKijunStop ? longStopKijun : longStopFixed
+shortStop = useKijunStop ? shortStopKijun : shortStopFixed
+
+// ══════════════════════════════════════════════════════════════════════════════
+// EXECUTION
+// ══════════════════════════════════════════════════════════════════════════════
+
+if longSignal
+    strategy.entry("Long", strategy.long)
+    strategy.exit("LX", "Long", stop=longStop, limit=close + tpTicks*tick)
+
+if shortSignal
+    strategy.entry("Short", strategy.short)
+    strategy.exit("SX", "Short", stop=shortStop, limit=close - tpTicks*tick)
+
+// Update Kijun trailing stop each bar
+if useKijunStop and strategy.position_size > 0
+    strategy.exit("LX", "Long", stop=longStopKijun, limit=close + tpTicks*tick)
+
+if useKijunStop and strategy.position_size < 0
+    strategy.exit("SX", "Short", stop=shortStopKijun, limit=close - tpTicks*tick)
+
+// EOD flatten
+if useSession and timeNow >= sessEnd and strategy.position_size != 0
+    strategy.close_all("EOD")
+
+// ══════════════════════════════════════════════════════════════════════════════
+// VISUALS
+// ══════════════════════════════════════════════════════════════════════════════
+
+plot(tenkan, "Tenkan", color.new(color.blue, 0), 2)
+plot(kijun, "Kijun", color.new(color.red, 0), 2)
+
+p1 = plot(senkouA[displacement], "Senkou A", color.new(color.green, 50), 1)
+p2 = plot(senkouB[displacement], "Senkou B", color.new(color.red, 50), 1)
+fill(p1, p2, color=senkouA[displacement] > senkouB[displacement] ? color.new(color.green, 80) : color.new(color.red, 80))
+
+plot(close, "Chikou", color.new(color.purple, 0), 1, offset=-displacement)
+
+plotshape(longSignal, "Long", shape.triangleup, location.belowbar, color.lime, size=size.normal)
+plotshape(shortSignal, "Short", shape.triangledown, location.abovebar, color.red, size=size.normal)
+
+bgcolor(close > cloudTop and cloudBullish ? color.new(color.green, 93) : close < cloudBottom and cloudBearish ? color.new(color.red, 93) : color.new(color.gray, 95))
+
+// ══════════════════════════════════════════════════════════════════════════════
+// INFO PANEL
+// ══════════════════════════════════════════════════════════════════════════════
+
+var table t = table.new(position.top_right, 2, 8, bgcolor=color.new(color.black, 75))
+if barstate.islast
+    table.cell(t, 0, 0, "ICHI-OPT", text_color=color.black, bgcolor=color.orange)
+    table.cell(t, 1, 0, "V2", text_color=color.black, bgcolor=color.orange)
+
+    posVsCloud = close > cloudTop ? "ABOVE" : close < cloudBottom ? "BELOW" : "IN"
+    table.cell(t, 0, 1, "Cloud", text_color=color.white)
+    table.cell(t, 1, 1, posVsCloud, text_color=close > cloudTop ? color.lime : close < cloudBottom ? color.red : color.gray)
+
+    table.cell(t, 0, 2, "TK", text_color=color.white)
+    table.cell(t, 1, 2, tenkan > kijun ? "BULL" : "BEAR", text_color=tenkan > kijun ? color.lime : color.red)
+
+    table.cell(t, 0, 3, "Chikou", text_color=color.white)
+    table.cell(t, 1, 3, chikouAbove ? "ABOVE" : "BELOW", text_color=chikouAbove ? color.lime : color.red)
+
+    table.cell(t, 0, 4, "Thick", text_color=color.white)
+    table.cell(t, 1, 4, str.tostring(cloudThickness, "#") + "t", text_color=cloudThickness >= minCloudTicks ? color.lime : color.red)
+
+    table.cell(t, 0, 5, "RSI", text_color=color.white)
+    table.cell(t, 1, 5, str.tostring(rsi, "#"), text_color=rsi >= rsiLongMin ? color.lime : rsi <= rsiShortMax ? color.red : color.white)
+
+    table.cell(t, 0, 6, "Stop", text_color=color.white)
+    table.cell(t, 1, 6, useKijunStop ? "KIJUN" : "FIXED", text_color=color.yellow)
+
+    table.cell(t, 0, 7, "TP", text_color=color.white)
+    table.cell(t, 1, 7, str.tostring(tpTicks, "#") + "t", text_color=color.aqua)
