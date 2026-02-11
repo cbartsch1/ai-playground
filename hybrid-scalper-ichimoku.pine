@@ -1,6 +1,6 @@
 // Hybrid Scalper-Ichimoku Strategy
 // Combines: Proven Scalper (HTF EMA, VWAP, EMA crossover, split sessions)
-//         + Ichimoku RSI v2 (Cloud filter, Chikou confirmation, Kijun trailing stop)
+//         + Ichimoku RSI v2 (Cloud filter, Chikou confirmation)
 // For ES 5m chart with mode selector (Conservative / Moderate / Aggressive)
 // All inputs optimizable with minval/maxval/step
 //@version=5
@@ -180,15 +180,31 @@ shortSignal = shortTrigger and passHTF_S and passCloud_S and passCloudThick_S an
 
 // Risk inputs — sized for 5m ES (1 tick = 0.25 pts = $12.50)
 // 20 ticks = 5 pts = $250 SL, 28 ticks = 7 pts = $350 TP
-slTicksInput = input.float(20, "Fixed SL Ticks",        minval=12, maxval=32, step=4, group="Smart Exits")
-tpTicksInput = input.float(28, "Fixed TP Ceiling Ticks", minval=16, maxval=48, step=4, group="Smart Exits")
-kijunBuffer  = input.float(2,  "Kijun Stop Buffer",     minval=1,  maxval=4,  step=1, group="Smart Exits")
-maxStopDist  = input.float(24, "Max Stop Distance",     minval=12, maxval=32, step=4, group="Smart Exits",
-                 tooltip="Clamps Kijun stop so it's never farther than this many ticks from entry")
+slTicksInput = input.float(20, "Base SL Ticks",          minval=12, maxval=32, step=4, group="Smart Exits")
+tpTicksInput = input.float(28, "Base TP Ceiling Ticks",  minval=16, maxval=48, step=4, group="Smart Exits")
+useATRStops  = input.bool(true, "ATR-Adaptive Stops",    group="Smart Exits",
+                 tooltip="Scale SL/TP with current volatility via ATR. Wider stops in volatile opens, tighter in calm afternoons.")
+atrLen       = input.int(14, "ATR Length",               minval=7,  maxval=21, step=7, group="Smart Exits")
+atrMultSL    = input.float(1.5, "ATR SL Multiplier",     minval=0.5, maxval=3.0, step=0.25, group="Smart Exits")
+atrMultTP    = input.float(2.0, "ATR TP Multiplier",     minval=1.0, maxval=4.0, step=0.25, group="Smart Exits")
+minSLTicks   = input.float(12, "Min SL Ticks (floor)",   minval=8,  maxval=20, step=4, group="Smart Exits")
+maxSLTicks   = input.float(32, "Max SL Ticks (ceiling)", minval=20, maxval=48, step=4, group="Smart Exits")
 
-// Mode overrides for SL/TP (scaled for 5m)
-slTicks = isConservative ? slTicksInput - 4 : isAggressive ? slTicksInput + 4 : slTicksInput
-tpTicks = isConservative ? tpTicksInput - 4 : isAggressive ? tpTicksInput + 8 : tpTicksInput
+// ATR in ticks for ES (ATR is in points, convert to ticks: pts / mintick)
+atrVal     = ta.atr(atrLen)
+atrInTicks = atrVal / syminfo.mintick
+
+// Compute stops: ATR-scaled if enabled, otherwise use base inputs
+rawSLTicks = useATRStops ? atrInTicks * atrMultSL : slTicksInput
+rawTPTicks = useATRStops ? atrInTicks * atrMultTP : tpTicksInput
+
+// Mode overrides (scaled for 5m)
+modeSL = isConservative ? rawSLTicks - 4 : isAggressive ? rawSLTicks + 4 : rawSLTicks
+modeTP = isConservative ? rawTPTicks - 4 : isAggressive ? rawTPTicks + 8 : rawTPTicks
+
+// Clamp SL to sane range to avoid absurd stops in extreme volatility
+slTicks = math.max(minSLTicks, math.min(maxSLTicks, modeSL))
+tpTicks = math.max(minSLTicks, modeTP)
 
 // ══════════════════════════════════════════════════════════════════════════════
 // EXECUTION
@@ -204,11 +220,14 @@ if shortSignal
     strategy.entry("S", strategy.short)
     strategy.exit("SX", "S", loss=slTicks, profit=tpTicks)
 
-// Fixed loss/profit stops handle all risk management
-// Kijun trailing can be re-enabled later once base strategy is profitable
+// SL/TP stops handle all risk management (ATR-adaptive when enabled)
 
-// Session flatten at morning end and afternoon end
-if (timeNow >= sessEnd and timeNow < sessStart2) or timeNow >= sessEnd2
+// Session flatten: close on the last bar OF the session, not the first bar after
+// For 5m bars, the bar at 11:40 covers 11:40-11:45, so flatten when timeNow == sessEnd - 5
+// This ensures we don't hold through the gap between sessions
+amFlattenTime = sessEnd - 5
+pmFlattenTime = sessEnd2 - 5
+if (timeNow >= amFlattenTime and timeNow < sessStart2) or timeNow >= pmFlattenTime
     if strategy.position_size != 0
         strategy.close_all("Session End")
 
@@ -300,11 +319,13 @@ if barstate.islast
 
     // Row 7: Stop Type
     table.cell(t, 0, 7, "Stop", text_color=color.white)
-    table.cell(t, 1, 7, "KIJUN+" + str.tostring(kijunBuffer, "#") + "t", text_color=color.yellow)
+    stopLabel = useATRStops ? "ATR" : "FIXED"
+    stopColor = useATRStops ? color.yellow : color.aqua
+    table.cell(t, 1, 7, stopLabel, text_color=stopColor)
 
-    // Row 8: Risk
-    table.cell(t, 0, 8, "Risk", text_color=color.white)
-    table.cell(t, 1, 8, str.tostring(slTicks, "#") + "/" + str.tostring(tpTicks, "#") + "t", text_color=color.aqua)
+    // Row 8: Risk (SL/TP in ticks, live values)
+    table.cell(t, 0, 8, "SL/TP", text_color=color.white)
+    table.cell(t, 1, 8, str.tostring(slTicks, "#.#") + "/" + str.tostring(tpTicks, "#.#") + "t", text_color=color.aqua)
 
     // Row 9: Session
     table.cell(t, 0, 9, "Session", text_color=color.white)
