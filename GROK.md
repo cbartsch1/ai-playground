@@ -30,22 +30,19 @@ Multi-AI workflow project for ES/NQ futures scalping strategies in Pine Script v
 - `ichimoku-rsi-v1.pine` — First Ichimoku version
 - `claude-strategy.pine`, `gemini-strategy.pine`, `combined-strategy.pine` — AI-generated experiments
 
-**Optimization-ready versions (archived):**
-- `proven-scalper-opt.pine` — Proven Scalper with minval/maxval/step on all inputs. **Fixed: lookahead_off**.
-- `ichimoku-rsi-v2-opt.pine` — Ichimoku RSI v2 with full parameter sweep ranges.
-- `hybrid-scalper-ichimoku.pine` — HYBRID v7 (abandoned — structure breaks have no edge on ES 5m)
-
-**Current flagship:**
-- `amt-tema-strategy.pine` — **AMT-TEMA v6** — Auction Market Theory + Triple EMA
-  - **Setup 1**: IB Breakout + TEMA (trend day entry after IB range break)
-  - **Setup 2**: Value Area Fade + TEMA Slope (mean reversion at prev-day VA edges → POC)
-  - **Setup 3**: 80% Rule + TEMA (open outside VA, re-enter and traverse to opposite edge)
-  - VWAP-based VA, day-type classification (narrow/normal/wide IB), volatility filter
-  - Optimized from 22-test manual parameter sweep
+**Optimization-ready versions (current):**
+- `proven-scalper-opt.pine` — Proven Scalper with minval/maxval/step on all inputs for TradingView Strategy Tester sweeps. **Fixed: lookahead_off** for accurate backtesting.
+- `ichimoku-rsi-v2-opt.pine` — Ichimoku RSI v2 with full parameter sweep ranges on all inputs.
+- `hybrid-scalper-ichimoku.pine` — **HYBRID v7** (current flagship). Combined hybrid strategy:
+  - **Entry**: Direct structure break (v4 logic — best win rate at 41.1%)
+  - **Trade reduction**: Higher lookback (8) + cooldown (6) + EMA alignment gate
+  - From Proven Scalper: HTF 15m EMA bias, VWAP filter, split sessions
+  - From Ichimoku: Cloud alignment + thickness filter, Chikou confirmation, Kijun trailing stop
+  - **Mode Selector**: Conservative / Standard / Aggressive (controls gate strictness, RSI bands, SL/TP)
+  - **8 toggleable entry gates**: HTF EMA, EMA Alignment, Cloud alignment, Cloud thickness, Chikou, RSI zone, VWAP, Volume
+  - **Smart Exits**: Smart Kijun trailing (only improves stop, never worsens), fixed TP, session flatten
+  - **14-row info panel** showing all filter states + cooldown + lookback
   - All inputs optimizable, lookahead_off, Pine Script v6, designed for ES 5m chart
-- `amt-tema-test-ib.pine` — IB Breakout isolated test file
-- `amt-tema-test-va.pine` — VA Fade isolated test file
-- `amt-tema-test-tx.pine` — TEMA Crossover isolated test file (proved unprofitable)
 
 ## Version History
 
@@ -89,39 +86,10 @@ ES is most profitably traded using auction theory. TEMA (Triple EMA) for trend/m
 4. **Day type classification** — balance vs. trend days
 
 **Planned setups (prioritized):**
-1. IB Breakout + TEMA Confirmation (trend-day setup) — IMPLEMENTED v1
-2. Value Area Fade + TEMA Slope (mean-reversion setup) — IMPLEMENTED v1
-3. 80% Rule + TEMA Direction (high-probability setup) — TODO v2
-4. TEMA Trend + Auction Context (adaptive setup) — TODO v2
-
-### AMT-TEMA Results (Oct 26 2025 – Feb 12 2026, ES 5m, 1 contract)
-
-| Version | P&L | Trades | Win Rate | PF | Max DD |
-|---------|------|--------|----------|------|--------|
-| v1 (3 setups) | +$3,850 | 55 | 34.55% | 1.279 | $4,630 |
-| v5 (IB+VA only) | +$11,313 | 45 | 53.33% | 2.358 | $2,238 |
-| v5.1 (optimized) | +$12,315 | 47 | 55.32% | 2.427 | $2,198 |
-| **v5.2 (IB max=2)** | **+$13,365** | **~49** | **57.5%** | **~2.5** | **$2,198** |
-| v6 (80% Rule ON) | +$9,890 | 62 | 53.2% | 1.685 | $3,790 |
-| **v6 (80% Rule OFF)** | **= v5.2** | **~49** | **57.5%** | **~2.5** | **$2,198** |
-
-**v6 finding**: 80% Rule added ~13 trades but lost ~-$3,475 net (-$267/trade avg). VWAP-based VA proxy too imprecise for tight stop/target placement. Setup kept in code (default OFF) pending real volume profile VA improvement.
-
-**Key discovery**: Isolated testing revealed TEMA Crossover (Setup 3) was losing -$3,313 while VA Fade made +$8,993. Removing it flipped the strategy from marginal to strong. ADX-based setups (4 approaches tested) all degraded performance.
-
-### Isolated Setup Performance
-| Setup | P&L | Trades | WR | PF |
-|-------|------|--------|------|------|
-| VA Fade | +$8,993 | 24 | 58.33% | 3.507 |
-| IB Breakout | +$2,245 | 21 | 47.62% | 1.466 |
-| TEMA Crossover | -$3,313 | 65 | 52.31% | 0.788 |
-
-### v5.1 Optimization Findings (22-test manual sweep)
-- **TEMA Fast = 9 is optimal** (5 and 13 both worse). Slow (16-28) and Trend (39-69) are insensitive — strategy is robust, not curve-fitted.
-- **Stop = IB Mid is optimal** (IB Edge and ATR both worse)
-- **Winners applied to v5.1**: Cooldown 4→2 (+$1,380), VA Buffer 2→4 (+$965), VA R:R 1.0→0.5 (+$840), Trade End 1530→1500 (+$282), Min IB 5→8 (+$205)
-- Combined v5.1 improvement: +$1,002 over v5 (parameters interact, expected)
-- **TradingView 5m bar limit**: ~20,000 bars = ~3.5 months with ETH on ES1!
+1. IB Breakout + TEMA Confirmation (trend-day setup)
+2. Value Area Fade + TEMA Slope (mean-reversion setup)
+3. 80% Rule + TEMA Direction (high-probability setup)
+4. TEMA Trend + Auction Context (adaptive setup)
 
 ## Guidelines
 - All AI tools share this context
@@ -134,20 +102,17 @@ ES is most profitably traded using auction theory. TEMA (Triple EMA) for trend/m
   - **Gemini CLI**: Fast web research, current info, quick iterations
   - **Grok CLI**: Real-time X/Twitter data, different perspective
 
-## Current Tasks — AMT-TEMA
-- [x] Design and code AMT+TEMA v1 — **DONE** (+$3,850, PF 1.279)
-- [x] Implement TEMA engine, IB tracker, VA levels, IB Breakout + VA Fade setups
-- [x] Isolate and test each setup independently — VA Fade star, TEMA Crossover loser
-- [x] Build v5 with proven setups only (IB+VA) — **+$11,313, PF 2.358**
-- [x] Test ADX approaches (4 variants) — all degraded performance, abandoned
-- [x] 22-test manual parameter sweep across 4 rounds (TEMA, IB, VA, Session/Risk)
-- [x] Build v5.1 with optimized defaults — +$12,315, PF 2.427, 55% WR
-- [x] Test multi-contract scaling — confirmed pure linear (2x = exactly double), capital decision not strategy
-- [x] Test max trades/dir/day — IB=2 adds +$1,050 (good), VA=2 hurts (bad)
-- [x] Build v5.2 — **+$13,365, 57.5% WR, same $2,198 DD**
-- [ ] Test on NQ 5m
-- [ ] Improve VA levels — use volume.profile_session() instead of VWAP proxy
-- [ ] Add more trade volume (currently ~0.6 trades/day)
+## Current Tasks — Auction Theory + TEMA Strategy Build
+- [ ] **ALL TEAM**: Read `research/auction-theory-tema-research.md` before doing ANY work
+- [ ] Design and code the new AMT+TEMA strategy in Pine Script v6
+- [ ] Implement TEMA engine (TEMA 9/21/55 calculations + crossover + slope)
+- [ ] Implement Initial Balance tracker (IB High/Low/Range, first 60 min RTH)
+- [ ] Implement Previous Day VA levels (POC/VAH/VAL via volume.profile_session)
+- [ ] Build Setup 1: IB Breakout + TEMA Confirmation
+- [ ] Build Setup 2: Value Area Fade + TEMA Slope
+- [ ] Build Setup 3: 80% Rule + TEMA Direction
+- [ ] Backtest on ES 5m, compare to v4-v7 results
+- [ ] If profitable, run TradingView optimizer on key parameters
 
 ## Team Assignments
 - **Claude (Opus)**: Architecture, strategy design, complex Pine Script, debugging
