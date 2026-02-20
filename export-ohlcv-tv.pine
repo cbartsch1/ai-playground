@@ -1,0 +1,22 @@
+// OHLCV Data Exporter — copy from Data Window
+//
+// HOW TO USE:
+// 1. Add this indicator to your ES1! 5m chart
+// 2. Hover over any bar on the chart
+// 3. Look at the "Data Window" panel (click the { } icon on the right sidebar)
+// 4. You'll see O, H, L, C, V values for each bar
+//
+// Unfortunately TradingView doesn't let Pine Script export raw data to CSV.
+// The "Export chart data..." option is what we need.
+//
+// TO FIND IT: Look in the top-left of the chart for a hamburger menu (☰)
+// or try: right-click the chart background → look for Export option
+// or try: the (...) three-dot menu in the top toolbar
+//
+// If none of those work, try this keyboard shortcut approach:
+// Open browser console (Cmd+Option+J) and look for export functionality.
+//
+// This indicator is just a placeholder — it plots nothing.
+//@version=6
+indicator("OHLCV Export Helper", overlay=true)
+plot(na)

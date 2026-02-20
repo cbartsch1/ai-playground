@@ -1,0 +1,34 @@
+YOUR THREE CLAUDE INTERFACES
+=============================
+
+1. CLAUDE CODE (CLI) — Terminal Tool
+   Launch:     Type "claude" in your terminal
+   Can do:     Write code, read/edit files, run terminal commands,
+               git, search the web, manage projects, create sub-agents
+   Cannot do:  See your screen, click buttons, control mouse/keyboard
+   Use for:    Building strategies, backtesting, debugging,
+               file management, anything in the terminal
+
+2. CLAUDE DESKTOP APP (Computer Use) — GUI Automation
+   Launch:     Open the Claude desktop app (not terminal),
+               enable "Computer Use" in settings/features
+   Can do:     Everything #1 can do PLUS see your screen,
+               move your mouse, type on your keyboard,
+               interact with any GUI application
+   Cannot do:  Nothing — this is the most capable mode
+   Use for:    Setting up TradingView alerts, clicking through
+               broker platforms, any task involving a visual app
+   NOTE:       This is the one that set up your alerts last time
+
+3. CLAUDE.AI (Web Chat)
+   Launch:     Go to claude.ai in your browser
+   Can do:     Answer questions, analyze text/images, write code
+   Cannot do:  Touch your files, run commands, see your screen
+   Use for:    Quick questions, brainstorming, reviewing screenshots
+
+
+QUICK RULE OF THUMB
+=============================
+   Write/edit code, run backtests    -->  Claude Code (terminal)
+   Click buttons in an app           -->  Claude Desktop (computer use)
+   Ask a quick question              -->  Claude.ai (web)
