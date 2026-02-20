@@ -1,74 +1,33 @@
-// Hybrid Scalper-Ichimoku Strategy
-// Combines: Proven Scalper (HTF EMA, VWAP, EMA crossover, split sessions)
-//         + Ichimoku RSI v2 (Cloud filter, Chikou confirmation)
-// For ES 5m chart with mode selector (Conservative / Moderate / Aggressive)
-// All inputs optimizable with minval/maxval/step
-//@version=5
-strategy("Hybrid Scalper-Ichimoku", shorttitle="HYBRID", overlay=true,
-         pyramiding=0, initial_capital=10000, currency=currency.USD,
-         default_qty_type=strategy.fixed, default_qty_value=1,
-         commission_type=strategy.commission.cash_per_contract, commission_value=2.50,
-         slippage=1)
+// Hybrid Scalper-Ichimoku Strategy v7
+// Entry: Direct Structure Break (v4 logic — best win rate)
+// Trade reduction: Higher lookback/cooldown + EMA alignment gate (from v5)
+// Exit: Fixed SL/TP + optional smart Kijun trailing
+// For ES 5m chart | All inputs optimizable
+// v7: v4 direct breakout + v5 trade filters, no pullback, no ATR gate
+//@version=6
+strategy(title="Hybrid Scalper-Ichimoku", shorttitle="HYBRID-v7", overlay=true, pyramiding=0, initial_capital=100000, currency=currency.USD, default_qty_type=strategy.fixed, default_qty_value=1, commission_type=strategy.commission.cash_per_contract, commission_value=2.50, slippage=1, margin_long=5, margin_short=5)
 
 // ══════════════════════════════════════════════════════════════════════════════
 // MODE SELECTOR
 // ══════════════════════════════════════════════════════════════════════════════
 
-modeInput = input.string("Moderate", "Trading Mode", options=["Conservative", "Moderate", "Aggressive"], group="Mode")
+modeInput = input.string("Standard", "Trading Mode", options=["Conservative", "Standard", "Aggressive"], group="Mode")
 isConservative = modeInput == "Conservative"
-isModerate     = modeInput == "Moderate"
 isAggressive   = modeInput == "Aggressive"
 
 // ══════════════════════════════════════════════════════════════════════════════
-// HTF BIAS (from Proven Scalper) - lookahead OFF
+// HTF BIAS
 // ══════════════════════════════════════════════════════════════════════════════
 
-htfEmaLen = input.int(20, "HTF EMA Length", minval=10, maxval=50, step=5, group="HTF Bias")
-useHTF    = input.bool(true, "Require HTF Alignment", group="HTF Bias")  // ON by default — key directional filter
-
-htfEma = request.security(syminfo.tickerid, "15", ta.ema(close, htfEmaLen), lookahead=barmerge.lookahead_off)
+htfEmaLen  = input.int(20, "HTF EMA Length", minval=10, maxval=50, step=5, group="HTF Bias")
+useHTF     = input.bool(true, "Enable HTF Filter", group="HTF Bias")
+htfEmaRaw  = request.security(syminfo.tickerid, "15", ta.ema(close, htfEmaLen), lookahead=barmerge.lookahead_off)
+htfEma     = nz(htfEmaRaw, close)
 htfBullish = close > htfEma
 htfBearish = close < htfEma
 
 // ══════════════════════════════════════════════════════════════════════════════
-// EMA CROSSOVER TRIGGER (from Proven Scalper)
-// ══════════════════════════════════════════════════════════════════════════════
-
-emaFast = input.int(5, "Fast EMA", minval=3, maxval=8, step=1, group="EMA Trigger")
-emaSlow = input.int(10, "Slow EMA", minval=8, maxval=15, step=1, group="EMA Trigger")
-usePullback  = input.bool(true, "Enable Pullback Re-entry", group="EMA Trigger")
-cooldownBars = input.int(6, "Cooldown Bars After Exit", minval=1, maxval=15, step=1, group="EMA Trigger")
-
-ema5  = ta.ema(close, emaFast)
-ema10 = ta.ema(close, emaSlow)
-
-// Primary trigger: EMA crossover
-longCross  = ta.crossover(ema5, ema10)
-shortCross = ta.crossunder(ema5, ema10)
-
-// Secondary trigger: Pullback to slow EMA while trend is aligned
-// Long pullback: EMAs bullish, price dipped to/below slow EMA last bar, now closing above it
-// Deeper pullback = higher quality re-entry
-emasBullish    = ema5 > ema10
-emasBearish    = ema5 < ema10
-longPullback   = usePullback and emasBullish and low[1] <= ema10[1] and close > ema10
-shortPullback  = usePullback and emasBearish and high[1] >= ema10[1] and close < ema10
-
-// Cooldown: track bars since last exit to avoid churning
-var int barsSinceExit = 100
-if strategy.position_size == 0 and strategy.position_size[1] != 0
-    barsSinceExit := 0
-else if strategy.position_size == 0
-    barsSinceExit += 1
-
-pastCooldown = barsSinceExit >= cooldownBars
-
-// Combined triggers
-longTrigger  = (longCross or longPullback) and pastCooldown
-shortTrigger = (shortCross or shortPullback) and pastCooldown
-
-// ══════════════════════════════════════════════════════════════════════════════
-// ICHIMOKU CLOUD (from Ichimoku RSI v2)
+// ICHIMOKU
 // ══════════════════════════════════════════════════════════════════════════════
 
 tenkanLen    = input.int(9,  "Tenkan",       minval=7,  maxval=13, step=2, group="Ichimoku")
@@ -81,254 +40,274 @@ kijun   = (ta.highest(high, kijunLen) + ta.lowest(low, kijunLen)) / 2
 senkouA = (tenkan + kijun) / 2
 senkouB = (ta.highest(high, senkouBLen) + ta.lowest(low, senkouBLen)) / 2
 
-cloudTop    = math.max(senkouA, senkouB)
-cloudBottom = math.min(senkouA, senkouB)
-tick        = syminfo.mintick
+cloudTop       = math.max(senkouA, senkouB)
+cloudBottom    = math.min(senkouA, senkouB)
+tick           = syminfo.mintick
 cloudThickness = (cloudTop - cloudBottom) / tick
-
-cloudBullish = senkouA > senkouB
-cloudBearish = senkouA < senkouB
+cloudBullish   = senkouA > senkouB
+cloudBearish   = senkouA < senkouB
+chikouAbove    = close > close[displacement]
+chikouBelow    = close < close[displacement]
 
 // ══════════════════════════════════════════════════════════════════════════════
-// TOGGLEABLE GATES
+// ENTRY TRIGGER — Direct Structure Break
 // ══════════════════════════════════════════════════════════════════════════════
 
-// Gate 1: HTF EMA direction (already defined above with useHTF)
+swingLen     = input.int(8, "Structure Lookback", minval=3, maxval=15, step=1, group="Entry")
+cooldownBars = input.int(6, "Cooldown Bars", minval=1, maxval=15, step=1, group="Entry")
+minCandleStr = input.float(0.6, "Min Candle Strength", minval=0.3, maxval=0.9, step=0.05, group="Entry")
 
-// Gate 2: Cloud alignment
-useCloud = input.bool(false, "Require Cloud Alignment", group="Gates")
+emaFast = input.int(5, "Fast EMA", minval=3, maxval=8, step=1, group="Entry")
+emaSlow = input.int(10, "Slow EMA", minval=8, maxval=15, step=1, group="Entry")
+ema5  = ta.ema(close, emaFast)
+ema10 = ta.ema(close, emaSlow)
+
+recentHigh = ta.highest(high, swingLen)[1]
+recentLow  = ta.lowest(low, swingLen)[1]
+
+structBreakLong  = not na(recentHigh) and close > recentHigh
+structBreakShort = not na(recentLow) and close < recentLow
+
+// Candle strength
+candleRange      = high - low
+candleStrL       = candleRange > 0 ? (close - low) / candleRange : 0.0
+candleStrS       = candleRange > 0 ? (high - close) / candleRange : 0.0
+strongBullCandle = candleStrL >= minCandleStr
+strongBearCandle = candleStrS >= minCandleStr
+
+// Cooldown
+var int barsSinceExit = 100
+if strategy.position_size == 0 and strategy.position_size[1] != 0
+    barsSinceExit := 0
+else if strategy.position_size == 0
+    barsSinceExit += 1
+pastCooldown = barsSinceExit >= cooldownBars
+
+// Entry trigger: direct breakout + strong candle + cooldown
+longTrigger  = structBreakLong and strongBullCandle and pastCooldown
+shortTrigger = structBreakShort and strongBearCandle and pastCooldown
+
+// ══════════════════════════════════════════════════════════════════════════════
+// EXITS
+// ══════════════════════════════════════════════════════════════════════════════
+
+slTicks       = input.float(8.0, "Stop Loss Ticks", minval=4, maxval=16, step=2, group="Exits")
+tpTicks       = input.float(16.0, "Take Profit Ticks", minval=8, maxval=40, step=4, group="Exits")
+useKijunTrail = input.bool(false, "Use Kijun Trailing Stop", group="Exits")
+kijunBuffer   = input.float(2.0, "Kijun Buffer (ticks)", minval=0, maxval=6, step=1, group="Exits")
+
+modeSL = isConservative ? slTicks - 2 : isAggressive ? slTicks + 2 : slTicks
+modeTP = isConservative ? tpTicks - 4 : isAggressive ? tpTicks + 4 : tpTicks
+
+slPoints = modeSL * tick
+tpPoints = modeTP * tick
+
+// ══════════════════════════════════════════════════════════════════════════════
+// GATES
+// ══════════════════════════════════════════════════════════════════════════════
+
+// EMA Alignment (v5 addition — longs need fast > slow)
+useEmaAlign = input.bool(true, "Enable EMA Alignment", group="Gates")
+
+// RSI
+rsiLen        = input.int(7, "RSI Length", minval=5, maxval=14, step=1, group="RSI")
+rsiLongEntry  = input.int(55, "RSI Long Min", minval=40, maxval=65, step=5, group="RSI")
+rsiShortEntry = input.int(45, "RSI Short Max", minval=35, maxval=60, step=5, group="RSI")
+useRSI        = input.bool(true, "Enable RSI Filter", group="RSI")
+rsi           = ta.rsi(close, rsiLen)
+
+// VWAP
+useVWAP = input.bool(true, "Enable VWAP Filter", group="Gates")
+vwapRaw = ta.vwap(hlc3)
+vwapVal = nz(vwapRaw, close)
+
+// Cloud alignment
+useCloud = input.bool(false, "Enable Cloud Alignment", group="Gates")
 priceAboveCloud = close > cloudTop
 priceBelowCloud = close < cloudBottom
 
-// Gate 3: Cloud thickness minimum
-useCloudThick   = input.bool(false, "Require Cloud Thickness", group="Gates")
-minCloudTicks   = input.float(3, "Min Cloud Thickness (ticks)", minval=2, maxval=10, step=1, group="Gates")
+// Cloud thickness
+useCloudThick = input.bool(false, "Enable Cloud Thickness", group="Gates")
+minCloudTicks = input.float(3.0, "Min Cloud Ticks", minval=2, maxval=10, step=1, group="Gates")
 cloudThickEnough = cloudThickness >= minCloudTicks
 
-// Gate 4: Chikou confirmation
-useChikou = input.bool(false, "Require Chikou Confirmation", group="Gates")
-chikouAbove = close > close[displacement]
-chikouBelow = close < close[displacement]
+// Chikou
+useChikou = input.bool(false, "Enable Chikou", group="Gates")
 
-// Gate 5: RSI in zone
-rsiLen = input.int(7, "RSI Length", minval=5, maxval=14, step=1, group="RSI")
-// Mode-dependent defaults applied via ternary
-rsiLongEntry  = input.int(50, "RSI Long Min",  minval=40, maxval=60, step=5, group="RSI")
-rsiShortEntry = input.int(50, "RSI Short Max", minval=40, maxval=60, step=5, group="RSI")
+// Volume
+useVolFilter = input.bool(true, "Enable Volume Filter", group="Gates")
+volLen       = input.int(20, "Volume MA Length", minval=10, maxval=50, step=5, group="Gates")
+volMult      = input.float(0.8, "Volume Min Multiplier", minval=0.5, maxval=1.5, step=0.1, group="Gates")
+avgVol       = ta.sma(volume, volLen)
+volOK        = not na(avgVol) and volume >= avgVol * volMult
 
-rsi = ta.rsi(close, rsiLen)
-
-// Apply mode overrides for RSI
-rsiLongThresh  = isConservative ? 55 : isAggressive ? 40 : rsiLongEntry
-rsiShortThresh = isConservative ? 45 : isAggressive ? 60 : rsiShortEntry
-
-// Gate 6: VWAP alignment (from Proven Scalper)
-useVWAP = input.bool(false, "Require VWAP Alignment", group="Gates")
-vwap = ta.vwap(hlc3)
-
-// Gate 7: Session (from Proven Scalper - split morning/afternoon)
-sessStart  = input.int(935,  "Morning Start",  minval=900,  maxval=1000, step=5,  group="Session")
-sessEnd    = input.int(1145, "Morning End",     minval=1100, maxval=1200, step=15, group="Session")
+// Session
+useSession = input.bool(true, "Enable Session Filter", group="Session")
+sessStart  = input.int(940,  "Morning Start", minval=900, maxval=1000, step=5, group="Session")
+sessEnd    = input.int(1130, "Morning End", minval=1030, maxval=1200, step=15, group="Session")
 sessStart2 = input.int(1400, "Afternoon Start", minval=1330, maxval=1430, step=15, group="Session")
-sessEnd2   = input.int(1545, "Afternoon End",   minval=1500, maxval=1600, step=15, group="Session")
-
-timeNow     = hour * 100 + minute
-inMorning   = timeNow >= sessStart and timeNow < sessEnd
+sessEnd2   = input.int(1530, "Afternoon End", minval=1500, maxval=1600, step=15, group="Session")
+timeNow    = hour * 100 + minute
+inMorning  = timeNow >= sessStart and timeNow < sessEnd
 inAfternoon = timeNow >= sessStart2 and timeNow < sessEnd2
-inSession   = inMorning or inAfternoon
+inSession  = not useSession or inMorning or inAfternoon
 
 // ══════════════════════════════════════════════════════════════════════════════
-// MODE-BASED GATE OVERRIDES
+// ENTRY SIGNALS
 // ══════════════════════════════════════════════════════════════════════════════
 
-// Conservative: all gates forced ON
-// Moderate: respects user toggles (defaults: HTF on, cloud/chikou/VWAP off)
-// Aggressive: all gates forced OFF — only EMA cross + RSI + session
-gateHTF        = isConservative ? true  : isAggressive ? false : useHTF
-gateCloud      = isConservative ? true  : isAggressive ? false : useCloud
-gateCloudThick = isConservative ? true  : isAggressive ? false : useCloudThick
-gateChikou     = isConservative ? true  : isAggressive ? false : useChikou
-gateVWAP       = isConservative ? true  : isAggressive ? false : useVWAP
+passHTF_L      = not useHTF or htfBullish
+passVWAP_L     = not useVWAP or close > vwapVal
+passCloud_L    = not useCloud or (priceAboveCloud and cloudBullish)
+passThick_L    = not useCloudThick or cloudThickEnough
+passChi_L      = not useChikou or chikouAbove
+passRSI_L      = not useRSI or rsi > rsiLongEntry
+passVol_L      = not useVolFilter or volOK
+passEmaAlign_L = not useEmaAlign or (ema5 > ema10)
 
-// ══════════════════════════════════════════════════════════════════════════════
-// ENTRY SIGNALS - EMA cross is trigger, then pass all active gates
-// ══════════════════════════════════════════════════════════════════════════════
+longSignal = longTrigger and passHTF_L and passVWAP_L and passCloud_L and passThick_L and passChi_L and passRSI_L and passVol_L and passEmaAlign_L and inSession and strategy.position_size == 0
 
-// LONG gates
-passHTF_L        = not gateHTF or htfBullish
-passCloud_L      = not gateCloud or (priceAboveCloud and cloudBullish)
-passCloudThick_L = not gateCloudThick or cloudThickEnough
-passChikou_L     = not gateChikou or chikouAbove
-passRSI_L        = rsi > rsiLongThresh
-passVWAP_L       = not gateVWAP or close > vwap
+passHTF_S      = not useHTF or htfBearish
+passVWAP_S     = not useVWAP or close < vwapVal
+passCloud_S    = not useCloud or (priceBelowCloud and cloudBearish)
+passThick_S    = not useCloudThick or cloudThickEnough
+passChi_S      = not useChikou or chikouBelow
+passRSI_S      = not useRSI or rsi < rsiShortEntry
+passVol_S      = not useVolFilter or volOK
+passEmaAlign_S = not useEmaAlign or (ema5 < ema10)
 
-longSignal = longTrigger and passHTF_L and passCloud_L and passCloudThick_L and passChikou_L and passRSI_L and passVWAP_L and inSession and strategy.position_size == 0
+shortSignal = shortTrigger and passHTF_S and passVWAP_S and passCloud_S and passThick_S and passChi_S and passRSI_S and passVol_S and passEmaAlign_S and inSession and strategy.position_size == 0
 
-// SHORT gates
-passHTF_S        = not gateHTF or htfBearish
-passCloud_S      = not gateCloud or (priceBelowCloud and cloudBearish)
-passCloudThick_S = not gateCloudThick or cloudThickEnough
-passChikou_S     = not gateChikou or chikouBelow
-passRSI_S        = rsi < rsiShortThresh
-passVWAP_S       = not gateVWAP or close < vwap
-
-shortSignal = shortTrigger and passHTF_S and passCloud_S and passCloudThick_S and passChikou_S and passRSI_S and passVWAP_S and inSession and strategy.position_size == 0
-
-// ══════════════════════════════════════════════════════════════════════════════
-// SMART EXITS
-// ══════════════════════════════════════════════════════════════════════════════
-
-// Risk inputs — sized for 5m ES (1 tick = 0.25 pts = $12.50)
-// 20 ticks = 5 pts = $250 SL, 28 ticks = 7 pts = $350 TP
-slTicksInput = input.float(20, "Base SL Ticks",          minval=12, maxval=32, step=4, group="Smart Exits")
-tpTicksInput = input.float(28, "Base TP Ceiling Ticks",  minval=16, maxval=48, step=4, group="Smart Exits")
-useATRStops  = input.bool(true, "ATR-Adaptive Stops",    group="Smart Exits",
-                 tooltip="Scale SL/TP with current volatility via ATR. Wider stops in volatile opens, tighter in calm afternoons.")
-atrLen       = input.int(14, "ATR Length",               minval=7,  maxval=21, step=7, group="Smart Exits")
-atrMultSL    = input.float(1.5, "ATR SL Multiplier",     minval=0.5, maxval=3.0, step=0.25, group="Smart Exits")
-atrMultTP    = input.float(2.0, "ATR TP Multiplier",     minval=1.0, maxval=4.0, step=0.25, group="Smart Exits")
-minSLTicks   = input.float(12, "Min SL Ticks (floor)",   minval=8,  maxval=20, step=4, group="Smart Exits")
-maxSLTicks   = input.float(32, "Max SL Ticks (ceiling)", minval=20, maxval=48, step=4, group="Smart Exits")
-
-// ATR in ticks for ES (ATR is in points, convert to ticks: pts / mintick)
-atrVal     = ta.atr(atrLen)
-atrInTicks = atrVal / syminfo.mintick
-
-// Compute stops: ATR-scaled if enabled, otherwise use base inputs
-rawSLTicks = useATRStops ? atrInTicks * atrMultSL : slTicksInput
-rawTPTicks = useATRStops ? atrInTicks * atrMultTP : tpTicksInput
-
-// Mode overrides (scaled for 5m)
-modeSL = isConservative ? rawSLTicks - 4 : isAggressive ? rawSLTicks + 4 : rawSLTicks
-modeTP = isConservative ? rawTPTicks - 4 : isAggressive ? rawTPTicks + 8 : rawTPTicks
-
-// Clamp SL to sane range to avoid absurd stops in extreme volatility
-slTicks = math.max(minSLTicks, math.min(maxSLTicks, modeSL))
-tpTicks = math.max(minSLTicks, modeTP)
+// Track entry stop level for smart Kijun trail
+var float entryStopLevel = na
+var float entryTPLevel   = na
 
 // ══════════════════════════════════════════════════════════════════════════════
 // EXECUTION
 // ══════════════════════════════════════════════════════════════════════════════
 
-// Use built-in loss/profit (in ticks from fill price) — guaranteed accurate
-// These fire immediately from actual entry price, no manual calculation needed
 if longSignal
+    entryStopLevel := close - slPoints
+    entryTPLevel   := close + tpPoints
     strategy.entry("L", strategy.long)
-    strategy.exit("LX", "L", loss=slTicks, profit=tpTicks)
+    strategy.exit("LX", "L", stop=entryStopLevel, limit=entryTPLevel)
 
 if shortSignal
+    entryStopLevel := close + slPoints
+    entryTPLevel   := close - tpPoints
     strategy.entry("S", strategy.short)
-    strategy.exit("SX", "S", loss=slTicks, profit=tpTicks)
+    strategy.exit("SX", "S", stop=entryStopLevel, limit=entryTPLevel)
 
-// SL/TP stops handle all risk management (ATR-adaptive when enabled)
+// Smart Kijun trail: only move stop if Kijun is BETTER than the original entry stop
+if useKijunTrail and strategy.position_size > 0 and not na(entryStopLevel)
+    kijunStopPrice = kijun - kijunBuffer * tick
+    effectiveStop = math.max(kijunStopPrice, entryStopLevel)
+    strategy.exit("LX", "L", stop=effectiveStop, limit=entryTPLevel)
 
-// Session flatten: close on the last bar OF the session, not the first bar after
-// For 5m bars, the bar at 11:40 covers 11:40-11:45, so flatten when timeNow == sessEnd - 5
-// This ensures we don't hold through the gap between sessions
-amFlattenTime = sessEnd - 5
-pmFlattenTime = sessEnd2 - 5
-if (timeNow >= amFlattenTime and timeNow < sessStart2) or timeNow >= pmFlattenTime
-    if strategy.position_size != 0
-        strategy.close_all("Session End")
+if useKijunTrail and strategy.position_size < 0 and not na(entryStopLevel)
+    kijunStopPrice = kijun + kijunBuffer * tick
+    effectiveStop = math.min(kijunStopPrice, entryStopLevel)
+    strategy.exit("SX", "S", stop=effectiveStop, limit=entryTPLevel)
+
+// Clear entry levels when flat
+if strategy.position_size == 0
+    entryStopLevel := na
+    entryTPLevel   := na
+
+if useSession
+    amFlattenTime = sessEnd - 5
+    pmFlattenTime = sessEnd2 - 5
+    if (timeNow >= amFlattenTime and timeNow < sessStart2) or timeNow >= pmFlattenTime
+        if strategy.position_size != 0
+            strategy.close_all("Session End")
 
 // ══════════════════════════════════════════════════════════════════════════════
 // VISUALS
 // ══════════════════════════════════════════════════════════════════════════════
 
-// EMAs
-plot(ema5, "EMA Fast", color.lime, 1)
+plot(ema5, "EMA Fast", color.green, 1)
 plot(ema10, "EMA Slow", color.red, 1)
-
-// HTF EMA
 plot(htfEma, "15m EMA", color.yellow, 2)
-
-// Ichimoku lines
 plot(tenkan, "Tenkan", color.new(color.blue, 30), 1)
 plot(kijun, "Kijun", color.new(color.red, 30), 2)
 
-// Cloud
 p1 = plot(senkouA[displacement], "Senkou A", color.new(color.green, 60), 1)
 p2 = plot(senkouB[displacement], "Senkou B", color.new(color.red, 60), 1)
 fill(p1, p2, color=senkouA[displacement] > senkouB[displacement] ? color.new(color.green, 85) : color.new(color.red, 85))
 
-// Chikou
 plot(close, "Chikou", color.new(color.purple, 30), 1, offset=-displacement)
+plot(vwapVal, "VWAP", color.white, 1)
+plot(recentHigh, "Swing High", color.new(color.green, 50), 1, plot.style_stepline)
+plot(recentLow, "Swing Low", color.new(color.red, 50), 1, plot.style_stepline)
 
-// VWAP
-plot(vwap, "VWAP", color.white, 1)
+plotshape(structBreakLong, "Break Up", shape.flag, location.abovebar, color.new(color.green, 40), size=size.tiny)
+plotshape(structBreakShort, "Break Down", shape.flag, location.belowbar, color.new(color.red, 40), size=size.tiny)
+plotshape(longSignal, "Long Entry", shape.triangleup, location.belowbar, color.green, size=size.small)
+plotshape(shortSignal, "Short Entry", shape.triangledown, location.abovebar, color.red, size=size.small)
 
-// Signals — diamond for pullback, triangle for crossover
-longIsCross = longSignal and longCross
-longIsPull  = longSignal and not longCross
-shortIsCross = shortSignal and shortCross
-shortIsPull  = shortSignal and not shortCross
-
-plotshape(longIsCross, "Long Cross", shape.triangleup, location.belowbar, color.lime, size=size.small)
-plotshape(longIsPull, "Long Pull", shape.diamond, location.belowbar, color.aqua, size=size.small)
-plotshape(shortIsCross, "Short Cross", shape.triangledown, location.abovebar, color.red, size=size.small)
-plotshape(shortIsPull, "Short Pull", shape.diamond, location.abovebar, color.orange, size=size.small)
-
-// Background - session and bias
 bgcolor(not inSession ? color.new(color.gray, 90) : htfBullish ? color.new(color.green, 95) : htfBearish ? color.new(color.red, 95) : na)
 
 // ══════════════════════════════════════════════════════════════════════════════
-// INFO PANEL - 10 rows
+// INFO PANEL
 // ══════════════════════════════════════════════════════════════════════════════
 
-var table t = table.new(position.top_right, 2, 10, bgcolor=color.new(color.black, 75))
+var table t = table.new(position.top_right, 2, 14, color.new(color.black, 75))
 if barstate.islast
-    // Row 0: Mode
     modeColor = isConservative ? color.blue : isAggressive ? color.red : color.orange
-    table.cell(t, 0, 0, "HYBRID", text_color=color.black, bgcolor=modeColor)
+    table.cell(t, 0, 0, "HYBRID v7", text_color=color.black, bgcolor=modeColor)
     table.cell(t, 1, 0, modeInput, text_color=color.black, bgcolor=modeColor)
 
-    // Row 1: HTF Bias
     table.cell(t, 0, 1, "HTF Bias", text_color=color.white)
-    htfText = not gateHTF ? "OFF" : htfBullish ? "BULL" : "BEAR"
-    htfColor = not gateHTF ? color.gray : htfBullish ? color.lime : color.red
+    htfText = not useHTF ? "OFF" : htfBullish ? "BULL" : "BEAR"
+    htfColor = not useHTF ? color.gray : htfBullish ? color.green : color.red
     table.cell(t, 1, 1, htfText, text_color=htfColor)
 
-    // Row 2: Cloud Position
+    table.cell(t, 0, 2, "VWAP", text_color=color.white)
+    vwapText = not useVWAP ? "OFF" : close > vwapVal ? "ABOVE" : "BELOW"
+    vwapColor = not useVWAP ? color.gray : close > vwapVal ? color.green : color.red
+    table.cell(t, 1, 2, vwapText, text_color=vwapColor)
+
+    table.cell(t, 0, 3, "EMA Align", text_color=color.white)
+    emaAlignText = not useEmaAlign ? "OFF" : ema5 > ema10 ? "BULL" : "BEAR"
+    emaAlignColor = not useEmaAlign ? color.gray : ema5 > ema10 ? color.green : color.red
+    table.cell(t, 1, 3, emaAlignText, text_color=emaAlignColor)
+
+    table.cell(t, 0, 4, "RSI", text_color=color.white)
+    rsiText = not useRSI ? "OFF" : str.tostring(rsi, "#")
+    rsiColor = not useRSI ? color.gray : rsi > rsiLongEntry ? color.green : rsi < rsiShortEntry ? color.red : color.white
+    table.cell(t, 1, 4, rsiText, text_color=rsiColor)
+
+    table.cell(t, 0, 5, "Volume", text_color=color.white)
+    volText = not useVolFilter ? "OFF" : volOK ? "OK" : "LOW"
+    volColor = not useVolFilter ? color.gray : volOK ? color.green : color.red
+    table.cell(t, 1, 5, volText, text_color=volColor)
+
+    table.cell(t, 0, 6, "Session", text_color=color.white)
+    sessText = not useSession ? "OFF" : inMorning ? "AM" : inAfternoon ? "PM" : "CLOSED"
+    sessColor = not useSession ? color.gray : (inMorning or inAfternoon) ? color.green : color.red
+    table.cell(t, 1, 6, sessText, text_color=sessColor)
+
     posVsCloud = close > cloudTop ? "ABOVE" : close < cloudBottom ? "BELOW" : "IN"
-    cloudPosColor = close > cloudTop ? color.lime : close < cloudBottom ? color.red : color.gray
-    table.cell(t, 0, 2, "Cloud", text_color=color.white)
-    table.cell(t, 1, 2, not gateCloud ? "OFF" : posVsCloud, text_color=not gateCloud ? color.gray : cloudPosColor)
+    cloudPosColor = close > cloudTop ? color.green : close < cloudBottom ? color.red : color.gray
+    table.cell(t, 0, 7, "Cloud", text_color=color.white)
+    table.cell(t, 1, 7, not useCloud ? "OFF" : posVsCloud, text_color=not useCloud ? color.gray : cloudPosColor)
 
-    // Row 3: Cloud Thickness
-    table.cell(t, 0, 3, "Thick", text_color=color.white)
-    thickText = not gateCloudThick ? "OFF" : str.tostring(cloudThickness, "#") + "t"
-    thickColor = not gateCloudThick ? color.gray : cloudThickEnough ? color.lime : color.red
-    table.cell(t, 1, 3, thickText, text_color=thickColor)
+    table.cell(t, 0, 8, "Chikou", text_color=color.white)
+    chikouText = not useChikou ? "OFF" : chikouAbove ? "ABOVE" : "BELOW"
+    chikouColor = not useChikou ? color.gray : chikouAbove ? color.green : color.red
+    table.cell(t, 1, 8, chikouText, text_color=chikouColor)
 
-    // Row 4: Chikou
-    table.cell(t, 0, 4, "Chikou", text_color=color.white)
-    chikouText = not gateChikou ? "OFF" : chikouAbove ? "ABOVE" : "BELOW"
-    chikouColor = not gateChikou ? color.gray : chikouAbove ? color.lime : color.red
-    table.cell(t, 1, 4, chikouText, text_color=chikouColor)
+    table.cell(t, 0, 9, "Exit", text_color=color.white)
+    table.cell(t, 1, 9, useKijunTrail ? "KIJUN" : "FIXED", text_color=useKijunTrail ? color.yellow : color.aqua)
 
-    // Row 5: VWAP
-    table.cell(t, 0, 5, "VWAP", text_color=color.white)
-    vwapText = not gateVWAP ? "OFF" : close > vwap ? "ABOVE" : "BELOW"
-    vwapColor = not gateVWAP ? color.gray : close > vwap ? color.lime : color.red
-    table.cell(t, 1, 5, vwapText, text_color=vwapColor)
+    table.cell(t, 0, 10, "SL/TP", text_color=color.white)
+    table.cell(t, 1, 10, str.tostring(modeSL, "#") + "/" + str.tostring(modeTP, "#") + "t", text_color=color.aqua)
 
-    // Row 6: RSI
-    table.cell(t, 0, 6, "RSI", text_color=color.white)
-    rsiColor = rsi > rsiLongThresh ? color.lime : rsi < rsiShortThresh ? color.red : color.white
-    table.cell(t, 1, 6, str.tostring(rsi, "#"), text_color=rsiColor)
+    table.cell(t, 0, 11, "Cooldown", text_color=color.white)
+    table.cell(t, 1, 11, str.tostring(barsSinceExit) + "/" + str.tostring(cooldownBars), text_color=pastCooldown ? color.green : color.red)
 
-    // Row 7: Stop Type
-    table.cell(t, 0, 7, "Stop", text_color=color.white)
-    stopLabel = useATRStops ? "ATR" : "FIXED"
-    stopColor = useATRStops ? color.yellow : color.aqua
-    table.cell(t, 1, 7, stopLabel, text_color=stopColor)
+    table.cell(t, 0, 12, "Lookback", text_color=color.white)
+    table.cell(t, 1, 12, str.tostring(swingLen) + " bars", text_color=color.aqua)
 
-    // Row 8: Risk (SL/TP in ticks, live values)
-    table.cell(t, 0, 8, "SL/TP", text_color=color.white)
-    table.cell(t, 1, 8, str.tostring(slTicks, "#.#") + "/" + str.tostring(tpTicks, "#.#") + "t", text_color=color.aqua)
-
-    // Row 9: Session
-    table.cell(t, 0, 9, "Session", text_color=color.white)
-    sessText = inMorning ? "AM" : inAfternoon ? "PM" : "CLOSED"
-    sessColor = inSession ? color.lime : color.red
-    table.cell(t, 1, 9, sessText, text_color=sessColor)
+    table.cell(t, 0, 13, "Capital", text_color=color.white)
+    table.cell(t, 1, 13, "$" + str.tostring(strategy.equity, "#,###"), text_color=strategy.equity >= 100000 ? color.green : color.red)

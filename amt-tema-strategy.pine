@@ -1,18 +1,21 @@
-// AMT-TEMA Strategy v6
+// AMT-TEMA Strategy v8
 // Auction Market Theory + Triple EMA
 // For ES 5m chart | All inputs optimizable
 //
 // SETUPS:
-//   1. IB Breakout + TEMA — trend day entry after IB break
-//   2. Value Area Fade + TEMA Slope — mean reversion at VA edges
-//   3. 80% Rule + TEMA — open outside VA, re-enter and traverse
+//   1. IB Breakout + TEMA — trend day SHORT entries after IB break (default short-only)
+//   2. Value Area Fade + TEMA Slope — mean reversion at VA edges (default OFF)
+//   3. 80% Rule + TEMA — open outside VA, re-enter and traverse (default OFF)
 //
-// v5:   Baseline PF 2.358 / +$11,313 / 45 trades / 3.5 mo
-// v5.1: Optimized defaults from 22-test parameter sweep (+$12,315, PF 2.427)
-// v5.2: Max IB Trades/Dir 1→2 (+$13,365, same DD)
-// v6:   Added 80% Rule (Setup 3)
+// v8:  2-year Databento validation (Feb 2024 - Feb 2026, 140,966 bars)
+//      - Short-only mode (longs lose -$5,589 over 2yr — dead weight)
+//      - 30bps percentage-based stop (scales with ES price: 15pt at 5000, 20pt at 6800)
+//      - Result: 177 trades, PF 1.511, +$30,084, 45.2% WR, $5.1K DD, Sharpe 2.65
+//      - p-value: 0.028 (t-test), 0.013 (permutation) — STATISTICALLY SIGNIFICANT
+// v7:  1-year data-driven optimization (no VA, skip Friday, noon blackout)
+// v6.1: maxIBRange 25→80, ibMaxStopPts 20pt cap, removed Day Type/volOK on IB
 //@version=6
-strategy(title="AMT-TEMA v6", shorttitle="AMT-TEMA-v6", overlay=true, pyramiding=0, initial_capital=100000, currency=currency.USD, default_qty_type=strategy.fixed, default_qty_value=1, commission_type=strategy.commission.cash_per_contract, commission_value=2.50, slippage=1, margin_long=5, margin_short=5)
+strategy(title="AMT-TEMA v8", shorttitle="AMT-TEMA-v8", overlay=true, pyramiding=0, initial_capital=100000, currency=currency.USD, default_qty_type=strategy.fixed, default_qty_value=1, commission_type=strategy.commission.cash_per_contract, commission_value=2.50, slippage=1, margin_long=5, margin_short=5)
 
 // ══════════════════════════════════════════════════════════════════════════════
 // TEMA ENGINE
@@ -56,10 +59,29 @@ tradeStart  = input.int(1035, "Trade Start (ET)", minval=1030, maxval=1100, step
 tradeEnd    = input.int(1500, "Trade End (ET)",   minval=1430, maxval=1555, step=5, group="Session")
 flattenTime = input.int(1555, "Flatten Time (ET)", minval=1530, maxval=1600, step=5, group="Session")
 
+// --- Time Filters (v7) ---
+skipFriday     = input.bool(true, "Skip Fridays", group="Session")
+blackoutStart  = input.int(1200, "Blackout Start (ET)", minval=0, maxval=1500, step=5, group="Session")
+blackoutEnd    = input.int(1300, "Blackout End (ET)", minval=0, maxval=1500, step=5, group="Session")
+
+// --- Direction Filter (v8) ---
+dirFilter      = input.string("Short Only", "Direction", options=["Short Only", "Both", "Long Only"], group="Session")
+allowLongs     = dirFilter != "Short Only"
+allowShorts    = dirFilter != "Long Only"
+
+// --- Automation (PickMyTrade → Tradovate) ---
+pmtToken    = input.string("k170b15680ae5ebcff062d", "PickMyTrade Token", group="Automation", tooltip="From PickMyTrade dashboard")
+pmtAccount  = input.string("DEMO2361007", "Tradovate Account ID", group="Automation")
+
 isRTH           = etTime >= rthStart and etTime < rthEnd
 isIBPeriod      = etTime >= rthStart and etTime < ibEndTime
 isTradingWindow = etTime >= tradeStart and etTime < tradeEnd
 newRTH          = isRTH and not isRTH[1]
+
+// Friday detection (Pine dayofweek: 1=Sun, 6=Fri, 7=Sat)
+isFriday    = dayofweek(time, "America/New_York") == dayofweek.friday
+inBlackout  = blackoutStart > 0 and blackoutEnd > 0 and etTime >= blackoutStart and etTime < blackoutEnd
+entryAllowed = not (skipFriday and isFriday) and not inBlackout
 
 // ══════════════════════════════════════════════════════════════════════════════
 // INITIAL BALANCE — First 60 min of RTH (9:30-10:30 ET)
@@ -236,8 +258,14 @@ if newRTH
 useIBBreak     = input.bool(true, "Enable IB Breakout", group="IB Breakout")
 useTrendFilter = input.bool(true, "Require TEMA Trend Filter", group="IB Breakout")
 minIBRange     = input.float(8.0,  "Min IB Range (pts)", minval=1,  maxval=15, step=1, group="IB Breakout")
-maxIBRange     = input.float(25.0, "Max IB Range (pts)", minval=10, maxval=50, step=5, group="IB Breakout")
+maxIBRange     = input.float(80.0, "Max IB Range (pts)", minval=10, maxval=120, step=5, group="IB Breakout")
 ibStopType     = input.string("IB Mid", "Stop Placement", options=["IB Mid", "IB Edge", "ATR"], group="IB Breakout")
+ibMaxStopPts   = input.float(20.0, "Max IB Stop (pts)", minval=5, maxval=40, step=5, group="IB Breakout", tooltip="Used when Pct Stop is OFF")
+ibMinTarget    = input.float(10.0, "Min IB Target (pts)", minval=5, maxval=25, step=5, group="IB Breakout")
+
+// --- Percentage-Based Stop (v8) ---
+ibPctStop      = input.bool(true, "Use % Stop (scales with price)", group="IB Breakout")
+ibStopBps      = input.float(30.0, "Stop Size (basis points)", minval=10, maxval=60, step=5, group="IB Breakout", tooltip="30 bps = 0.3%. At ES 6800 = 20.4pt, at ES 5000 = 15pt")
 maxIBTrades    = input.int(2, "Max IB Trades/Dir/Day", minval=1, maxval=3, step=1, group="IB Breakout")
 
 ibValid = ibRange >= minIBRange and ibRange <= maxIBRange
@@ -248,34 +276,37 @@ ibCrossDown = ibDone and ta.crossunder(close, ibLow)
 ibTrendOK_L = not useTrendFilter or trendUp
 ibTrendOK_S = not useTrendFilter or trendDown
 
-// Day type gate: skip IB breakout on wide IB days (rotational, breakouts fail)
-ibDayTypeOK = not useDayType or not isWideIB
-
 var int ibTradesL = 0
 var int ibTradesS = 0
 if newRTH
     ibTradesL := 0
     ibTradesS := 0
 
-ibLongSignal  = useIBBreak and ibCrossUp and temaBullish and ibTrendOK_L and ibValid and ibDayTypeOK and volOK and isTradingWindow and pastCooldown and strategy.position_size == 0 and ibTradesL < maxIBTrades
-ibShortSignal = useIBBreak and ibCrossDown and temaBearish and ibTrendOK_S and ibValid and ibDayTypeOK and volOK and isTradingWindow and pastCooldown and strategy.position_size == 0 and ibTradesS < maxIBTrades
+// NOTE: volOK intentionally removed from IB — high vol IS the trend day, don't filter it out
+ibLongSignal  = allowLongs and useIBBreak and ibCrossUp and temaBullish and ibTrendOK_L and ibValid and isTradingWindow and entryAllowed and pastCooldown and strategy.position_size == 0 and ibTradesL < maxIBTrades
+ibShortSignal = allowShorts and useIBBreak and ibCrossDown and temaBearish and ibTrendOK_S and ibValid and isTradingWindow and entryAllowed and pastCooldown and strategy.position_size == 0 and ibTradesS < maxIBTrades
 
 if ibLongSignal
     ibTradesL += 1
 if ibShortSignal
     ibTradesS += 1
 
-ibSL_L = ibStopType == "IB Mid" ? ibMid : ibStopType == "IB Edge" ? ibLow : close - atrVal * 1.5
-ibTP_L = close + ibRange
-ibSL_S = ibStopType == "IB Mid" ? ibMid : ibStopType == "IB Edge" ? ibHigh : close + atrVal * 1.5
-ibTP_S = close - ibRange
+// Dynamic max stop: percentage-based (v8) or fixed points
+ibMaxStopDyn = ibPctStop ? close * ibStopBps / 10000.0 : ibMaxStopPts
+
+ibRawSL_L = ibStopType == "IB Mid" ? ibMid : ibStopType == "IB Edge" ? ibLow : close - atrVal * 1.5
+ibSL_L = math.max(ibRawSL_L, close - ibMaxStopDyn)
+ibTP_L = close + math.max(ibRange, ibMinTarget)
+ibRawSL_S = ibStopType == "IB Mid" ? ibMid : ibStopType == "IB Edge" ? ibHigh : close + atrVal * 1.5
+ibSL_S = math.min(ibRawSL_S, close + ibMaxStopDyn)
+ibTP_S = close - math.max(ibRange, ibMinTarget)
 
 // ══════════════════════════════════════════════════════════════════════════════
 // SETUP 2: VALUE AREA FADE + TEMA SLOPE
 // Day type filter: prefer wide/normal IB days (rotational, fades work)
 // ══════════════════════════════════════════════════════════════════════════════
 
-useVAFade   = input.bool(true, "Enable VA Fade", group="VA Fade")
+useVAFade   = input.bool(false, "Enable VA Fade", group="VA Fade")
 vaBuffer    = input.float(4.0, "VA Touch Buffer (ticks)", minval=0, maxval=8, step=1, group="VA Fade")
 vaStopMult  = input.float(0.5, "VA Stop (ATR mult)", minval=0.3, maxval=2.0, step=0.1, group="VA Fade")
 vaMinRR     = input.float(0.5, "VA Min R:R", minval=0.5, maxval=3.0, step=0.5, group="VA Fade")
@@ -307,8 +338,8 @@ if newRTH
     vaTradesL := 0
     vaTradesS := 0
 
-vaLongSignal  = useVAFade and vaTouchLow and slopeRising and vaRROK_L and vaDayTypeOK and volOK and isTradingWindow and pastCooldown and strategy.position_size == 0 and vaTradesL < maxVATrades
-vaShortSignal = useVAFade and vaTouchHigh and slopeFalling and vaRROK_S and vaDayTypeOK and volOK and isTradingWindow and pastCooldown and strategy.position_size == 0 and vaTradesS < maxVATrades
+vaLongSignal  = allowLongs and useVAFade and vaTouchLow and slopeRising and vaRROK_L and vaDayTypeOK and volOK and isTradingWindow and entryAllowed and pastCooldown and strategy.position_size == 0 and vaTradesL < maxVATrades
+vaShortSignal = allowShorts and useVAFade and vaTouchHigh and slopeFalling and vaRROK_S and vaDayTypeOK and volOK and isTradingWindow and entryAllowed and pastCooldown and strategy.position_size == 0 and vaTradesS < maxVATrades
 
 if vaLongSignal
     vaTradesL += 1
@@ -352,8 +383,8 @@ if isRTH and (openAboveVA or openBelowVA) and not eightyConfirmed
         eightyConfirmed := true
 
 // Signal stays armed after confirmation — fires when all gates align (not just one bar)
-eightyLongSignal  = useEighty and openBelowVA and eightyConfirmed and (temaBullish or slopeRising) and volOK and isTradingWindow and pastCooldown and strategy.position_size == 0 and eightyTradesL < maxEightyTrades
-eightyShortSignal = useEighty and openAboveVA and eightyConfirmed and (temaBearish or slopeFalling) and volOK and isTradingWindow and pastCooldown and strategy.position_size == 0 and eightyTradesS < maxEightyTrades
+eightyLongSignal  = allowLongs and useEighty and openBelowVA and eightyConfirmed and (temaBullish or slopeRising) and volOK and isTradingWindow and entryAllowed and pastCooldown and strategy.position_size == 0 and eightyTradesL < maxEightyTrades
+eightyShortSignal = allowShorts and useEighty and openAboveVA and eightyConfirmed and (temaBearish or slopeFalling) and volOK and isTradingWindow and entryAllowed and pastCooldown and strategy.position_size == 0 and eightyTradesS < maxEightyTrades
 
 if eightyLongSignal
     eightyTradesL += 1
@@ -367,39 +398,64 @@ eightySL_S = prevVAHVal + atrVal * eightyStopBuf
 eightyTP_S = prevVALVal
 
 // ══════════════════════════════════════════════════════════════════════════════
+// AUTOMATION — PickMyTrade JSON Builder
+// ══════════════════════════════════════════════════════════════════════════════
+
+pmtMsg(action, sl, tp) =>
+    p = str.tostring(close, "#.##")
+    s = str.tostring(sl, "#.##")
+    t = str.tostring(tp, "#.##")
+    acct = '"multiple_accounts":[{"token":"' + pmtToken + '","account_id":"' + pmtAccount + '","risk_percentage":0,"quantity_multiplier":1}]}'
+    head = '{"symbol":"ES1!","data":"' + action + '","quantity":"1","risk_percentage":0,"price":"' + p + '",'
+    sltp = '"tp":' + t + ',"percentage_tp":0,"dollar_tp":0,"sl":' + s + ',"dollar_sl":0,"percentage_sl":0,'
+    trail = '"trail":0,"trail_stop":0,"trail_trigger":0,"trail_freq":0,"update_tp":false,"update_sl":false,'
+    bkevn = '"breakeven":0,"breakeven_offset":0,"token":"' + pmtToken + '",'
+    flags = '"pyramid":false,"same_direction_ignore":false,"reverse_order_close":false,'
+    head + sltp + trail + bkevn + flags + acct
+
+pmtCloseMsg() =>
+    acct = '"multiple_accounts":[{"token":"' + pmtToken + '","account_id":"' + pmtAccount + '","risk_percentage":0,"quantity_multiplier":1}]}'
+    head = '{"symbol":"ES1!","data":"close","quantity":"1","risk_percentage":0,"price":"0",'
+    zeros = '"tp":0,"percentage_tp":0,"dollar_tp":0,"sl":0,"dollar_sl":0,"percentage_sl":0,'
+    trail = '"trail":0,"trail_stop":0,"trail_trigger":0,"trail_freq":0,"update_tp":false,"update_sl":false,'
+    bkevn = '"breakeven":0,"breakeven_offset":0,"token":"' + pmtToken + '",'
+    flags = '"pyramid":false,"same_direction_ignore":false,"reverse_order_close":false,'
+    head + zeros + trail + bkevn + flags + acct
+
+// ══════════════════════════════════════════════════════════════════════════════
 // EXECUTION
 // ══════════════════════════════════════════════════════════════════════════════
 
 // Setup 1: IB Breakout
 if ibLongSignal
-    strategy.entry("IB_L", strategy.long)
-    strategy.exit("IB_LX", "IB_L", stop=ibSL_L, limit=ibTP_L)
+    strategy.entry("IB_L", strategy.long, alert_message=pmtMsg("buy", ibSL_L, ibTP_L))
+    strategy.exit("IB_LX", "IB_L", stop=ibSL_L, limit=ibTP_L, alert_message=pmtCloseMsg())
 
 if ibShortSignal
-    strategy.entry("IB_S", strategy.short)
-    strategy.exit("IB_SX", "IB_S", stop=ibSL_S, limit=ibTP_S)
+    strategy.entry("IB_S", strategy.short, alert_message=pmtMsg("sell", ibSL_S, ibTP_S))
+    strategy.exit("IB_SX", "IB_S", stop=ibSL_S, limit=ibTP_S, alert_message=pmtCloseMsg())
 
 // Setup 2: VA Fade
 if vaLongSignal
-    strategy.entry("VA_L", strategy.long)
-    strategy.exit("VA_LX", "VA_L", stop=vaSL_L, limit=vaTP_L)
+    strategy.entry("VA_L", strategy.long, alert_message=pmtMsg("buy", vaSL_L, vaTP_L))
+    strategy.exit("VA_LX", "VA_L", stop=vaSL_L, limit=vaTP_L, alert_message=pmtCloseMsg())
 
 if vaShortSignal
-    strategy.entry("VA_S", strategy.short)
-    strategy.exit("VA_SX", "VA_S", stop=vaSL_S, limit=vaTP_S)
+    strategy.entry("VA_S", strategy.short, alert_message=pmtMsg("sell", vaSL_S, vaTP_S))
+    strategy.exit("VA_SX", "VA_S", stop=vaSL_S, limit=vaTP_S, alert_message=pmtCloseMsg())
 
 // Setup 3: 80% Rule
 if eightyLongSignal
-    strategy.entry("80_L", strategy.long)
-    strategy.exit("80_LX", "80_L", stop=eightySL_L, limit=eightyTP_L)
+    strategy.entry("80_L", strategy.long, alert_message=pmtMsg("buy", eightySL_L, eightyTP_L))
+    strategy.exit("80_LX", "80_L", stop=eightySL_L, limit=eightyTP_L, alert_message=pmtCloseMsg())
 
 if eightyShortSignal
-    strategy.entry("80_S", strategy.short)
-    strategy.exit("80_SX", "80_S", stop=eightySL_S, limit=eightyTP_S)
+    strategy.entry("80_S", strategy.short, alert_message=pmtMsg("sell", eightySL_S, eightyTP_S))
+    strategy.exit("80_SX", "80_S", stop=eightySL_S, limit=eightyTP_S, alert_message=pmtCloseMsg())
 
 // Session flatten
 if etTime >= flattenTime and strategy.position_size != 0
-    strategy.close_all("RTH End")
+    strategy.close_all("RTH End", alert_message=pmtCloseMsg())
 
 // ══════════════════════════════════════════════════════════════════════════════
 // VISUALS
@@ -438,9 +494,9 @@ bgcolor(not isRTH ? color.new(color.gray, 95) : isIBPeriod ? color.new(color.blu
 // DASHBOARD
 // ══════════════════════════════════════════════════════════════════════════════
 
-var table t = table.new(position.top_right, 2, 16, color.new(color.black, 75))
+var table t = table.new(position.top_right, 2, 18, color.new(color.black, 75))
 if barstate.islast
-    table.cell(t, 0, 0, "AMT-TEMA v6", text_color=color.black, bgcolor=color.orange)
+    table.cell(t, 0, 0, "AMT-TEMA v8", text_color=color.black, bgcolor=color.orange)
     table.cell(t, 1, 0, "", bgcolor=color.orange)
 
     table.cell(t, 0, 1, "TEMA", text_color=color.white)
@@ -485,16 +541,30 @@ if barstate.islast
     sessColor = isTradingWindow ? color.green : isIBPeriod ? color.yellow : isRTH ? color.white : color.gray
     table.cell(t, 1, 10, sessText, text_color=sessColor)
 
-    table.cell(t, 0, 11, "Cooldown", text_color=color.white)
-    table.cell(t, 1, 11, str.tostring(barsSinceExit) + "/" + str.tostring(cooldownBars), text_color=pastCooldown ? color.green : color.red)
+    table.cell(t, 0, 11, "Filters", text_color=color.white)
+    filterText = (skipFriday and isFriday ? "FRI-OFF " : "") + (inBlackout ? "BLACKOUT " : "")
+    filterText := filterText == "" ? "CLEAR" : filterText
+    filterColor = entryAllowed ? color.green : color.red
+    table.cell(t, 1, 11, filterText, text_color=filterColor)
 
-    table.cell(t, 0, 12, "80% Rule", text_color=color.white)
+    table.cell(t, 0, 12, "Direction", text_color=color.white)
+    dirColor = dirFilter == "Short Only" ? color.red : dirFilter == "Long Only" ? color.green : color.white
+    table.cell(t, 1, 12, dirFilter, text_color=dirColor)
+
+    table.cell(t, 0, 13, "Max Stop", text_color=color.white)
+    stopText = ibPctStop ? str.tostring(ibStopBps, "#") + "bps (" + str.tostring(ibMaxStopDyn, "#.#") + "pt)" : str.tostring(ibMaxStopPts, "#") + "pt"
+    table.cell(t, 1, 13, stopText, text_color=color.white)
+
+    table.cell(t, 0, 14, "Cooldown", text_color=color.white)
+    table.cell(t, 1, 14, str.tostring(barsSinceExit) + "/" + str.tostring(cooldownBars), text_color=pastCooldown ? color.green : color.red)
+
+    table.cell(t, 0, 15, "80% Rule", text_color=color.white)
     eightyStatus = not useEighty ? "OFF" : not (openAboveVA or openBelowVA) ? "INACTIVE" : eightyConfirmed ? "CONFIRMED" : eightyReentered ? "COUNTING " + str.tostring(eightyInsideCount) + "/" + str.tostring(eightyConfBars) : "WAITING"
     eightyColor = not useEighty ? color.gray : eightyConfirmed ? color.lime : eightyReentered ? color.yellow : not (openAboveVA or openBelowVA) ? color.gray : color.white
-    table.cell(t, 1, 12, eightyStatus, text_color=eightyColor)
+    table.cell(t, 1, 15, eightyStatus, text_color=eightyColor)
 
-    table.cell(t, 0, 13, "Trades Today", text_color=color.white)
-    table.cell(t, 1, 13, "IB:" + str.tostring(ibTradesL + ibTradesS) + " VA:" + str.tostring(vaTradesL + vaTradesS) + " 80:" + str.tostring(eightyTradesL + eightyTradesS), text_color=color.aqua)
+    table.cell(t, 0, 16, "Trades Today", text_color=color.white)
+    table.cell(t, 1, 16, "IB:" + str.tostring(ibTradesL + ibTradesS) + " VA:" + str.tostring(vaTradesL + vaTradesS) + " 80:" + str.tostring(eightyTradesL + eightyTradesS), text_color=color.aqua)
 
-    table.cell(t, 0, 14, "Capital", text_color=color.white)
-    table.cell(t, 1, 14, "$" + str.tostring(strategy.equity, "#,###"), text_color=strategy.equity >= 100000 ? color.green : color.red)
+    table.cell(t, 0, 17, "Capital", text_color=color.white)
+    table.cell(t, 1, 17, "$" + str.tostring(strategy.equity, "#,###"), text_color=strategy.equity >= 100000 ? color.green : color.red)
