@@ -12,7 +12,7 @@ from .config import StrategyConfig
 from .indicators import compute_indicators
 from .session import SessionState, update_session
 from .position import Position, Trade
-from .setups import ib_breakout, va_fade, eighty_rule
+from .setups import ib_breakout, ib_rejection, level_rejection, va_fade, eighty_rule, tema_cross
 
 
 def run_backtest(df: pd.DataFrame, cfg: StrategyConfig, regime_filter=None,
@@ -51,6 +51,10 @@ def run_backtest(df: pd.DataFrame, cfg: StrategyConfig, regime_filter=None,
         # ── Update session state ──
         update_session(state, bar, prev_bar, cfg)
 
+        # ── Level state tracking (must run every bar, even in position) ──
+        level_rejection.update_level_state(bar, state, cfg)
+        level_rejection.update_support_level_state(bar, state, cfg)
+
         # ── Cooldown tracking ──
         # Match Pine: if position_size==0 and position_size[1]!=0 → just exited
         current_position_size = 0 if pos.is_flat else pos.direction
@@ -59,11 +63,24 @@ def run_backtest(df: pd.DataFrame, cfg: StrategyConfig, regime_filter=None,
         elif current_position_size == 0:
             state.bars_since_exit += 1
 
-        # ── Check exits on current bar (stop/target fill) ──
+        # ── Check exits on current bar (stop/target/trail fill) ──
         trade = pos.check_exit(bar, pessimistic=cfg.pessimistic_fills)
         if trade is not None:
             _finalize_trade(trade, cfg)
             trades.append(trade)
+
+        # ── TEMA Exit (v9) — close shorts when TEMA turns bullish ──
+        if not pos.is_flat and cfg.use_tema_exit:
+            if pos.direction == -1 and bar.get("tema_cross_up", False):
+                trade = pos.close_at_market(bar, "tema_exit")
+                if trade is not None:
+                    _finalize_trade(trade, cfg)
+                    trades.append(trade)
+            elif pos.direction == 1 and bar.get("tema_cross_down", False):
+                trade = pos.close_at_market(bar, "tema_exit")
+                if trade is not None:
+                    _finalize_trade(trade, cfg)
+                    trades.append(trade)
 
         # ── Session flatten ──
         et_time = bar.get("et_time", 0)
@@ -90,13 +107,30 @@ def run_backtest(df: pd.DataFrame, cfg: StrategyConfig, regime_filter=None,
                 if regime_info.get("label") in blocked:
                     regime_ok = False
 
-            if regime_ok and not (in_blackout or (cfg.skip_friday and is_friday)):
-                # Priority: IB Breakout > VA Fade > 80% Rule
+            time_ok = not (in_blackout or (cfg.skip_friday and is_friday))
+
+            if regime_ok and time_ok:
+                # Priority: IB Breakout > IB Rejection > Level Rejection Short > Level Rejection Long > VA Fade > 80% Rule > TEMA Cross
                 signal = ib_breakout.check_signal(bar, prev_bar, state, cfg)
+                if signal is None:
+                    signal = ib_rejection.check_signal(bar, prev_bar, state, cfg)
+                if signal is None:
+                    signal = level_rejection.check_signal(bar, prev_bar, state, cfg)
+                if signal is None:
+                    signal = level_rejection.check_signal_long(bar, prev_bar, state, cfg)
                 if signal is None:
                     signal = va_fade.check_signal(bar, prev_bar, state, cfg)
                 if signal is None:
                     signal = eighty_rule.check_signal(bar, prev_bar, state, cfg)
+                if signal is None:
+                    signal = tema_cross.check_signal(bar, prev_bar, state, cfg)
+
+            # Level Rejection gets its own shot if time filters blocked above
+            if regime_ok and not time_ok and signal is None:
+                if cfg.lvl_own_filters:
+                    signal = level_rejection.check_signal(bar, prev_bar, state, cfg)
+                if signal is None and cfg.lvl_long_own_filters:
+                    signal = level_rejection.check_signal_long(bar, prev_bar, state, cfg)
 
             # Direction filter
             if signal is not None and cfg.direction_filter != "both":
@@ -106,6 +140,13 @@ def run_backtest(df: pd.DataFrame, cfg: StrategyConfig, regime_filter=None,
                     signal = None
 
             if signal is not None:
+                # Compute trail params for this entry (v9)
+                trail_trigger = 0.0
+                trail_dist = 0.0
+                if cfg.use_trail_stop:
+                    trail_trigger = bar["close"] * cfg.trail_trigger_bps / 10000.0
+                    trail_dist = bar["close"] * cfg.trail_dist_bps / 10000.0
+
                 pos.enter(
                     direction=signal["direction"],
                     price=bar["close"],
@@ -114,6 +155,8 @@ def run_backtest(df: pd.DataFrame, cfg: StrategyConfig, regime_filter=None,
                     setup=signal["setup"],
                     time=idx,
                     slippage=cfg.slippage_pts,
+                    trail_trigger_pts=trail_trigger,
+                    trail_dist_pts=trail_dist,
                 )
 
         # ── Track for next iteration ──

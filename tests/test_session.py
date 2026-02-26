@@ -170,3 +170,88 @@ class TestTradeCounters:
         assert state.ib_trades_l == 0
         assert state.ib_trades_s == 0
         assert state.va_trades_l == 0
+
+
+class TestOvernightTracking:
+    def test_overnight_high_low_tracked(self):
+        """Globex bars accumulate on_high/on_low."""
+        cfg = StrategyConfig()
+        state = SessionState()
+
+        # First globex bar at 18:00
+        bar1 = _make_bar(1800, 5010, 4990, 5000)
+        bar1["is_globex"] = True
+        bar1["new_globex"] = True
+        update_session(state, bar1, None, cfg)
+        assert state.on_high == 5010
+        assert state.on_low == 4990
+        assert not state.on_frozen
+
+        # Second globex bar extends range
+        bar2 = _make_bar(1805, 5020, 4985, 5005)
+        bar2["is_globex"] = True
+        bar2["new_globex"] = False
+        update_session(state, bar2, bar1, cfg)
+        assert state.on_high == 5020
+        assert state.on_low == 4985
+
+    def test_overnight_frozen_at_rth_open(self):
+        """Overnight levels freeze when RTH opens."""
+        cfg = StrategyConfig()
+        state = SessionState()
+        state.on_high = 5020
+        state.on_low = 4985
+        state.on_frozen = False
+
+        # RTH open
+        bar = _make_bar(930, 5015, 4995, 5005, is_new_rth=True)
+        bar["is_globex"] = False
+        bar["new_globex"] = False
+        update_session(state, bar, None, cfg)
+
+        assert state.on_frozen is True
+        # Values preserved
+        assert state.on_high == 5020
+        assert state.on_low == 4985
+
+    def test_prev_day_high_low_stored_on_new_rth(self):
+        """Previous day's RTH high/low stored before reset on new_rth."""
+        cfg = StrategyConfig()
+        state = SessionState()
+        state.rth_hi = 5050
+        state.rth_lo = 4920
+
+        # Simulate some VWAP data so VA doesn't fail
+        state.rth_vwap_sum = 5000 * 1000 * 78
+        state.rth_vol_sum = 1000 * 78
+        state.rth_sq_dev = 100.0
+        state.rth_bars = 78
+
+        # New RTH
+        bar = _make_bar(930, 5010, 4990, 5000, is_new_rth=True)
+        bar["is_globex"] = False
+        bar["new_globex"] = False
+        update_session(state, bar, None, cfg)
+
+        assert state.prev_day_high == 5050
+        assert state.prev_day_low == 4920
+        # RTH hi/lo reset to new bar
+        assert state.rth_hi == 5010
+        assert state.rth_lo == 4990
+
+    def test_level_state_resets_on_new_rth(self):
+        """Level test counts and broken flags reset daily."""
+        cfg = StrategyConfig()
+        state = SessionState()
+        state.lvl_test_count = {"PDH": 3, "ONH": 1}
+        state.lvl_broken = {"PDH": True}
+        state.lvl_trades_s = 4
+
+        bar = _make_bar(930, 5010, 4990, 5000, is_new_rth=True)
+        bar["is_globex"] = False
+        bar["new_globex"] = False
+        update_session(state, bar, None, cfg)
+
+        assert state.lvl_test_count == {}
+        assert state.lvl_broken == {}
+        assert state.lvl_trades_s == 0

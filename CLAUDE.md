@@ -36,17 +36,21 @@ Multi-AI workflow project for ES/NQ futures scalping strategies in Pine Script v
 - `hybrid-scalper-ichimoku.pine` — HYBRID v7 (abandoned — structure breaks have no edge on ES 5m)
 
 **Current flagship:**
-- `amt-tema-strategy.pine` — **AMT-TEMA v8** — Auction Market Theory + Triple EMA (short-only, 30bps pct stop)
-  - **Setup 1**: IB Breakout + TEMA (trend day entry after IB range break)
-  - **Setup 2**: Value Area Fade + TEMA Slope (mean reversion at prev-day VA edges → POC)
-  - **Setup 3**: 80% Rule + TEMA (open outside VA, re-enter and traverse to opposite edge)
-  - VWAP-based VA, day-type classification (narrow/normal/wide IB), volatility filter
-  - Optimized from 22-test manual parameter sweep
+- `amt-tema-strategy-v9.pine` — **AMT-TEMA v9** — Exit overhaul + TEMA Cross entry
+  - **Setup 1**: IB Breakout + TEMA (continuous re-arm, scaled TP capped at ATR mult)
+  - **Setup 2**: Value Area Fade + TEMA Slope (default OFF)
+  - **Setup 3**: 80% Rule + TEMA (default OFF)
+  - **Setup 4**: TEMA Cross Short (momentum short on TEMA crossdown, day-type gated, default ON)
+  - ATR trailing stop (trigger + distance in bps), TEMA exit (close on TEMA cross)
+  - PMT JSON with trail fields for PickMyTrade
   - All inputs optimizable, lookahead_off, Pine Script v6, designed for ES 5m chart
+  - **NEEDS BACKTESTING** — not yet validated on 2yr data
+- `amt-tema-strategy.pine` — **AMT-TEMA v8** — Proven baseline (short-only, 30bps pct stop)
+  - 177 trades, PF 1.511, +$30,084, 45.2% WR, $5.1K DD, Sharpe 2.65
+  - p=0.028 (t-test), p=0.013 (permutation) — STATISTICALLY SIGNIFICANT
   - **Automation**: PickMyTrade webhook integration (Automation input group: token + account ID)
   - `pmtMsg()` / `pmtCloseMsg()` build full PMT JSON with SL/TP as absolute prices
   - `alert_message` on all `strategy.entry()` and `strategy.close_all()` calls
-  - Adding `alert_message` does NOT change backtest results (metadata only)
 - `amt-tema-test-ib.pine` — IB Breakout isolated test file
 - `amt-tema-test-va.pine` — VA Fade isolated test file
 - `amt-tema-test-tx.pine` — TEMA Crossover isolated test file (proved unprofitable)
@@ -258,6 +262,23 @@ PF ratio (out/in) = 0.77 (>0.7 = robust). v7 filters are structural market patte
 
 **Conclusion**: 177 trades / 2yr (~0.25/day) is the natural frequency. More trades require a different setup, not parameter tweaks.
 
+### v9 — Exit Overhaul + TEMA Cross Entry (Feb 24, 2026)
+
+**Problem**: v8 took only 1 late trade when 3 were available on a 100pt selloff. TP was set at 67pt (full IB range) — unreachable. No trailing stop meant a 45pt winner was held until flatten. No re-entries after the first trade. TEMA crossovers lined up as perfect short entries but weren't being used.
+
+**File**: `amt-tema-strategy-v9.pine` (separate from v8 — v8 preserved as proven baseline)
+
+**v9 changes:**
+1. Scaled TP: `ibTP = math.max(ibMinTarget, math.min(ibRange, atrVal * tpAtrMult))` — caps at ATR x 3.0 (wide IB 67pt → 45pt, narrow IB unchanged)
+2. Continuous re-arm: removed arm window mechanism, signal fires every bar below IB. Cooldown (2 bars) + maxIBTrades (3, was 2) prevent rapid-fire.
+3. ATR trailing stop: `trail_points` + `trail_offset` on all exits. Trigger 15bps, distance 20bps. At ES 6000: 9pt trigger, 12pt trail.
+4. TEMA exit: close shorts when TEMA fast crosses above slow (thesis invalidated). Uses `ta.crossover` not state.
+5. TEMA Cross setup (Setup 4): short-only on `ta.crossunder(temaFast, temaSlow)`, day-type gated ("Narrow Only" default). Requires `trendDown`. 30bps stop, 2x ATR TP.
+6. PMT JSON: `pmtMsg()` now takes `trailTrig` + `trailDist` params. Sets `trail:1, trail_trigger:X, trail_stop:Y, trail_freq:1`.
+7. Dashboard: 21 rows (was 18). New rows: Trail (trigger/dist bps), TEMA Exit (ON/OFF), TX Cross (ON/OFF + day type).
+
+**Status: NEEDS 2-YEAR BACKTESTING** — not yet validated. Plan: run Python backtest, A/B test by regime, optimize TEMA Cross day-type filter.
+
 ### Isolated Setup Performance
 | Setup | P&L | Trades | WR | PF |
 |-------|------|--------|------|------|
@@ -310,6 +331,10 @@ PF ratio (out/in) = 0.77 (>0.7 = robust). v7 filters are structural market patte
 - [x] **Build v8** — short-only + 30bps pct stop: **+$30,084, PF 1.511, p=0.028 — SIGNIFICANT over 2yr**
 - [x] Update SPX fork to v8 — `amt-tema-strategy-spx.pine` (short-only, pct stop, 18-row dashboard)
 - [x] TEST v8 on TradingView — verified on ES1! 5m: +$3,027, 22 trades, 45.45% WR, PF 1.315
+- [x] **Build v9** — exit overhaul + TEMA Cross: scaled TP, continuous re-arm, trail stop, TEMA exit, TX Cross setup
+- [ ] Run v9 2-year Python backtest — compare vs v8 baseline
+- [ ] A/B test TEMA Cross setup by day type / regime
+- [ ] TEST v9 on TradingView — verify multiple IB entries, trail stop, TEMA exit, TX entries
 - [ ] Improve VA levels — use volume.profile_session() instead of VWAP proxy
 - [x] Set up automated execution Path 1 — TradingView→PickMyTrade→Tradovate (LIVE ON DEMO, Feb 15)
 - [ ] Monitor demo for 1-2 weeks — verify entries match TradingView, SL/TP brackets correct, flatten at 15:55 works

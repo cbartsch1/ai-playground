@@ -88,3 +88,17 @@ def compute_indicators(df: pd.DataFrame,
     # Trend: close vs TEMA trend
     df["trend_up"] = df["close"] > df["tema_trend"]
     df["trend_down"] = df["close"] < df["tema_trend"]
+
+    # TEMA crossover/crossunder (v9) — transition detection
+    df["tema_cross_up"] = (df["tema_fast"] > df["tema_slow"]) & (df["tema_fast"].shift(1) <= df["tema_slow"].shift(1))
+    df["tema_cross_down"] = (df["tema_fast"] < df["tema_slow"]) & (df["tema_fast"].shift(1) >= df["tema_slow"].shift(1))
+
+    # EMA signals — for TEMA vs EMA comparison testing
+    df["ema_9"] = ema(df["close"], 9)
+    df["ema_21"] = ema(df["close"], 21)
+    df["ema_8"] = ema(df["close"], 8)
+    df["ema_bearish_9_21"] = df["ema_9"] < df["ema_21"]
+    df["ema_bearish_8_21"] = df["ema_8"] < df["ema_21"]
+    df["sma_8"] = sma(df["close"], 8)
+    df["sma_21"] = sma(df["close"], 21)
+    df["sma_bearish_8_21"] = df["sma_8"] < df["sma_21"]

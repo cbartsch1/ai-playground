@@ -55,6 +55,9 @@ def load_tos_csv(filepath: str, instrument: str = "ES") -> pd.DataFrame:
     df = df.dropna(subset=["open", "high", "low", "close"])
     df["volume"] = df["volume"].fillna(0).astype(int)
 
+    # Clean bad ticks (Databento CME data has phantom lows/opens ~60-75 on ES)
+    clean_bad_ticks(df)
+
     # Session tags
     df["et_hour"] = df.index.hour
     df["et_minute"] = df.index.minute
@@ -63,6 +66,37 @@ def load_tos_csv(filepath: str, instrument: str = "ES") -> pd.DataFrame:
     tag_sessions(df)
 
     return df
+
+
+def clean_bad_ticks(df: pd.DataFrame) -> None:
+    """Fix bad ticks in OHLC data (in-place).
+
+    Databento CME data has phantom lows/opens/closes around 60-75 on ES bars
+    where the real price is 4000-6000+. Uses percentile-based floor to identify
+    and replace bad values.
+    """
+    import numpy as np
+
+    # Use 10th percentile of close as the floor reference — robust to outliers
+    # even if 2% of bars are corrupted. Any value < floor/2 is a bad tick.
+    floor = np.nanpercentile(df["close"].values, 10) * 0.5
+    total_fixed = 0
+
+    # Fix close first, then use cleaned close to fix others
+    for col in ["close", "open", "low", "high"]:
+        bad = df[col] < floor
+        n_bad = bad.sum()
+        if n_bad > 0:
+            df.loc[bad, col] = np.nan
+            df[col] = df[col].ffill().bfill()
+            total_fixed += n_bad
+
+    # Ensure OHLC consistency: low <= open,close <= high
+    df["low"] = df[["low", "open", "close"]].min(axis=1)
+    df["high"] = df[["high", "open", "close"]].max(axis=1)
+
+    if total_fixed > 0:
+        print(f"  Data cleaning: fixed {total_fixed} bad ticks (floor={floor:.0f})")
 
 
 def tag_sessions(df: pd.DataFrame,
@@ -77,6 +111,10 @@ def tag_sessions(df: pd.DataFrame,
     df["is_rth"] = (et >= rth_start) & (et < rth_end)
     df["is_ib_period"] = (et >= rth_start) & (et < ib_end)
     df["is_trading_window"] = (et >= trade_start) & (et < trade_end)
+
+    # Globex session: 6 PM ET → 9:30 AM ET (overnight futures)
+    df["is_globex"] = (et >= 1800) | (et < rth_start)
+    df["new_globex"] = df["is_globex"] & ~df["is_globex"].shift(1, fill_value=False)
 
     # new_rth: first RTH bar after a non-RTH bar
     df["new_rth"] = df["is_rth"] & ~df["is_rth"].shift(1, fill_value=False)

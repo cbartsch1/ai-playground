@@ -1,6 +1,7 @@
 """Setup 1: IB Breakout + TEMA — trend day entry after IB range break.
 
-Matches Pine Script lines 235-276 exactly.
+v8: One-shot crossover/crossunder (ta.crossover/ta.crossunder)
+v9: Continuous re-arm (signal fires every bar price is beyond IB)
 """
 
 import math
@@ -30,17 +31,22 @@ def check_signal(bar: dict, prev_bar: Optional[dict], session, cfg) -> Optional[
     if not ib_valid:
         return None
 
-    # Crossover/crossunder detection
-    # Pine: ta.crossover(close, ibHigh) = close > ibHigh AND close[1] <= ibHigh[1 bar ago's ibHigh]
-    # Since ibHigh doesn't change after IB done, we compare current vs previous close
     if prev_bar is None:
         return None
 
     ib_high = session.ib_high
     ib_low = session.ib_low
 
-    cross_up = bar["close"] > ib_high and prev_bar["close"] <= ib_high
-    cross_down = bar["close"] < ib_low and prev_bar["close"] >= ib_low
+    # v9: Continuous re-arm — signal fires every bar beyond IB
+    # v8: One-shot crossover/crossunder
+    if cfg.tp_atr_mult > 0:
+        # v9 mode: continuous check
+        cross_up = bar["close"] > ib_high
+        cross_down = bar["close"] < ib_low
+    else:
+        # v8 mode: one-shot crossover/crossunder
+        cross_up = bar["close"] > ib_high and prev_bar["close"] <= ib_high
+        cross_down = bar["close"] < ib_low and prev_bar["close"] >= ib_low
 
     if not cross_up and not cross_down:
         return None
@@ -49,6 +55,8 @@ def check_signal(bar: dict, prev_bar: Optional[dict], session, cfg) -> Optional[
     max_stop = cfg.ib_max_stop_pts
     if cfg.pct_stop_mode:
         max_stop = bar["close"] * cfg.pct_stop_bps / 10000.0
+
+    atr = bar["atr"]
 
     # Direction-specific gates
     if cross_up:
@@ -59,16 +67,21 @@ def check_signal(bar: dict, prev_bar: Optional[dict], session, cfg) -> Optional[
         if session.ib_trades_l >= cfg.max_ib_trades:
             return None
 
-        # Stop/target — match Pine lines 271-273
         if cfg.ib_stop_type == "IB Mid":
             raw_sl = session.ib_mid
         elif cfg.ib_stop_type == "IB Edge":
             raw_sl = ib_low
         else:  # ATR
-            raw_sl = bar["close"] - bar["atr"] * 1.5
+            raw_sl = bar["close"] - atr * 1.5
 
         stop = max(raw_sl, bar["close"] - max_stop)
-        target = bar["close"] + max(session.ib_range, cfg.ib_min_target)
+
+        # v9 scaled TP: cap at ATR multiple
+        if cfg.tp_atr_mult > 0:
+            tp_pts = max(cfg.ib_min_target, min(session.ib_range, atr * cfg.tp_atr_mult))
+        else:
+            tp_pts = max(session.ib_range, cfg.ib_min_target)
+        target = bar["close"] + tp_pts
 
         session.ib_trades_l += 1
         return {"direction": 1, "stop": stop, "target": target, "setup": "IB"}
@@ -81,16 +94,21 @@ def check_signal(bar: dict, prev_bar: Optional[dict], session, cfg) -> Optional[
         if session.ib_trades_s >= cfg.max_ib_trades:
             return None
 
-        # Stop/target — match Pine lines 274-276
         if cfg.ib_stop_type == "IB Mid":
             raw_sl = session.ib_mid
         elif cfg.ib_stop_type == "IB Edge":
             raw_sl = ib_high
         else:  # ATR
-            raw_sl = bar["close"] + bar["atr"] * 1.5
+            raw_sl = bar["close"] + atr * 1.5
 
         stop = min(raw_sl, bar["close"] + max_stop)
-        target = bar["close"] - max(session.ib_range, cfg.ib_min_target)
+
+        # v9 scaled TP: cap at ATR multiple
+        if cfg.tp_atr_mult > 0:
+            tp_pts = max(cfg.ib_min_target, min(session.ib_range, atr * cfg.tp_atr_mult))
+        else:
+            tp_pts = max(session.ib_range, cfg.ib_min_target)
+        target = bar["close"] - tp_pts
 
         session.ib_trades_s += 1
         return {"direction": -1, "stop": stop, "target": target, "setup": "IB"}

@@ -52,11 +52,38 @@ class SessionState:
     va_trades_s: int = 0
     eighty_trades_l: int = 0
     eighty_trades_s: int = 0
+    tx_trades_s: int = 0
+    rej_trades_s: int = 0
 
     # --- 80% Rule state ---
     eighty_reentered: bool = False
     eighty_inside_count: int = 0
     eighty_confirmed: bool = False
+
+    # --- Overnight levels (6 PM → 9:30 AM, frozen at RTH open) ---
+    on_high: float = float("nan")
+    on_low: float = float("nan")
+    on_frozen: bool = False
+
+    # --- Previous day levels (stored on new_rth before reset) ---
+    prev_day_high: float = float("nan")
+    prev_day_low: float = float("nan")
+
+    # --- Level state tracking (reset daily) ---
+    lvl_test_count: dict = field(default_factory=dict)    # {"PDH": 2, "ONH": 1, ...}
+    lvl_broken: dict = field(default_factory=dict)        # {"PDH": False, "ONH": True, ...}
+    lvl_broken_count: dict = field(default_factory=dict)  # {"PDH": 0, ...} — consecutive closes above level
+    lvl_in_zone: dict = field(default_factory=dict)       # {"PDH": True, ...} — was bar in zone last bar?
+    lvl_first_test_bar: dict = field(default_factory=dict)  # {"PDH": 42, ...} — bar index of first test
+    lvl_trades_s: int = 0                                 # Shared trade counter across all SHORT level rejection entries
+    lvl_trades_l: int = 0                                 # Shared trade counter across all LONG level rejection entries
+    lvl_bar_index: int = 0                                # Bar counter within RTH session
+
+    # Support level state tracking (for longs — mirrors resistance tracking)
+    sup_test_count: dict = field(default_factory=dict)    # {"PDL": 2, "ONL": 1, ...}
+    sup_broken: dict = field(default_factory=dict)        # {"PDL": True, ...} — broken = close below level
+    sup_broken_count: dict = field(default_factory=dict)  # consecutive closes below level
+    sup_in_zone: dict = field(default_factory=dict)       # zone presence for dedup
 
     # --- Cooldown ---
     bars_since_exit: int = 100
@@ -91,8 +118,34 @@ def update_session(state: SessionState, bar: dict, prev_bar: Optional[dict],
     """
     new_rth = bar["new_rth"]
 
+    # ─── Overnight (Globex) tracking ───
+    is_globex = bar.get("is_globex", False)
+    new_globex = bar.get("new_globex", False)
+
+    if new_globex:
+        # New globex session — reset overnight levels
+        state.on_high = bar["high"]
+        state.on_low = bar["low"]
+        state.on_frozen = False
+    elif is_globex and not state.on_frozen:
+        # Accumulate overnight range
+        if math.isnan(state.on_high):
+            state.on_high = bar["high"]
+            state.on_low = bar["low"]
+        else:
+            state.on_high = max(state.on_high, bar["high"])
+            state.on_low = min(state.on_low, bar["low"])
+
     # ─── New RTH session reset ───
     if new_rth:
+        # Freeze overnight levels at RTH open
+        state.on_frozen = True
+
+        # Store previous day high/low BEFORE reset
+        if not math.isnan(state.rth_hi):
+            state.prev_day_high = state.rth_hi
+            state.prev_day_low = state.rth_lo
+
         # Store previous session VA before reset
         if state.rth_vol_sum > 0:
             session_vwap = state.rth_vwap_sum / state.rth_vol_sum
@@ -121,6 +174,24 @@ def update_session(state: SessionState, bar: dict, prev_bar: Optional[dict],
         state.va_trades_s = 0
         state.eighty_trades_l = 0
         state.eighty_trades_s = 0
+        state.tx_trades_s = 0
+        state.rej_trades_s = 0
+        state.lvl_trades_s = 0
+        state.lvl_trades_l = 0
+
+        # Reset level state tracking (resistance — shorts)
+        state.lvl_test_count = {}
+        state.lvl_broken = {}
+        state.lvl_broken_count = {}
+        state.lvl_in_zone = {}
+        state.lvl_first_test_bar = {}
+        state.lvl_bar_index = 0
+
+        # Reset support state tracking (support — longs)
+        state.sup_test_count = {}
+        state.sup_broken = {}
+        state.sup_broken_count = {}
+        state.sup_in_zone = {}
 
         # Reset 80% Rule
         state.eighty_reentered = False
@@ -167,6 +238,10 @@ def update_session(state: SessionState, bar: dict, prev_bar: Optional[dict],
                     state.ib_range_avg = ib_range
                 else:
                     state.ib_range_avg = state.ib_range_avg * (1 - alpha) + ib_range * alpha
+
+    # ─── Bar counter (RTH only) ───
+    if bar["is_rth"]:
+        state.lvl_bar_index += 1
 
     # ─── VWAP accumulation (RTH only) ───
     if bar["is_rth"]:
