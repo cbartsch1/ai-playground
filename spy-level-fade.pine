@@ -1,0 +1,499 @@
+// SPY Previous Day Level Fade
+// Auction Theory — fade PDH, PDL, PDC with VWAP mean reversion
+// For SPY 5m chart | All inputs optimizable
+//
+// SETUPS:
+//   1. PDH SHORT — fade at previous day's high (sellers defended yesterday)
+//   2. PDL LONG — fade at previous day's low (buyers defended yesterday)
+//   3. PDC FADE — fade at previous day's close after gap (gap fill reversal)
+//
+// Core idea: Previous day's H/L/C are the most-watched institutional levels.
+// When price approaches and shows rejection (fails to break through), responsive
+// participants fade the move back toward developing value (VWAP).
+//
+// Priority: PDH > PDL > PDC (only one signal per bar)
+//@version=6
+strategy(title="PDLevel Fade", shorttitle="PDLF", overlay=true, pyramiding=0, initial_capital=100000, currency=currency.USD, default_qty_type=strategy.percent_of_equity, default_qty_value=10, commission_type=strategy.commission.cash_per_order, commission_value=1.00, slippage=1)
+
+// ==============================================================================
+// SESSION & TIME (Eastern Time)
+// ==============================================================================
+
+etHour   = hour(time, "America/New_York")
+etMinute = minute(time, "America/New_York")
+etTime   = etHour * 100 + etMinute
+
+rthStart = 930
+rthEnd   = 1600
+
+// --- Session Inputs ---
+entryStartHour = input.int(10, "Entry Start Hour (ET)", minval=9, maxval=12, step=1, group="Session")
+entryStartMin  = input.int(0,  "Entry Start Min (ET)",  minval=0, maxval=55, step=5, group="Session")
+entryEndHour   = input.int(15, "Entry End Hour (ET)",    minval=13, maxval=15, step=1, group="Session")
+entryEndMin    = input.int(0,  "Entry End Min (ET)",     minval=0, maxval=55, step=5, group="Session")
+flattenHour    = input.int(15, "Flatten Hour (ET)",      minval=15, maxval=15, step=1, group="Session")
+flattenMin     = input.int(55, "Flatten Min (ET)",       minval=50, maxval=59, step=1, group="Session")
+skipFriday     = input.bool(true, "Skip Fridays", group="Session")
+
+entryStartTime = entryStartHour * 100 + entryStartMin
+entryEndTime   = entryEndHour * 100 + entryEndMin
+flattenTime    = flattenHour * 100 + flattenMin
+
+isRTH           = etTime >= rthStart and etTime < rthEnd
+newRTH          = isRTH and not isRTH[1]
+isTradingWindow = etTime >= entryStartTime and etTime < entryEndTime
+isFlattenTime   = etTime >= flattenTime
+
+// Friday detection
+isFriday    = dayofweek(time, "America/New_York") == dayofweek.friday
+entryAllowed = not (skipFriday and isFriday)
+
+// Session state for dashboard
+isOpening = isRTH and etTime < entryStartTime
+isClosing = isRTH and etTime >= entryEndTime
+isActive  = isRTH and isTradingWindow
+
+// ==============================================================================
+// LEVEL INPUTS
+// ==============================================================================
+
+zonePct     = input.float(0.15, "Zone Width (% of price)", minval=0.05, maxval=0.5, step=0.05, group="Levels")
+usePDC      = input.bool(true,  "Enable PDC Fade",         group="Levels")
+minGapPct   = input.float(0.2,  "Min Gap Size (%)",        minval=0.1, maxval=1.0, step=0.1, group="Levels")
+
+// ==============================================================================
+// ENTRY INPUTS
+// ==============================================================================
+
+rsiLen              = input.int(14,   "RSI Length",            minval=5,   maxval=30,  step=1,   group="Entry")
+rsiShortThresh      = input.int(55,   "RSI Short Threshold",   minval=50,  maxval=70,  step=5,   group="Entry")
+rsiLongThresh       = input.int(45,   "RSI Long Threshold",    minval=30,  maxval=50,  step=5,   group="Entry")
+volRatioMin         = input.float(0.8, "Min Volume Ratio",     minval=0.5, maxval=2.0, step=0.1, group="Entry")
+requireRejCandle    = input.bool(true, "Require Rejection Candle", group="Entry")
+
+// ==============================================================================
+// RISK INPUTS
+// ==============================================================================
+
+stopPct       = input.float(0.3,  "Stop Buffer (%)",     minval=0.1, maxval=1.0, step=0.1, group="Risk")
+maxStopPct    = input.float(0.8,  "Max Stop (%)",        minval=0.3, maxval=2.0, step=0.1, group="Risk")
+minTargetPct  = input.float(0.2,  "Min Target (%)",      minval=0.05, maxval=0.5, step=0.05, group="Risk")
+cooldownBars  = input.int(3,      "Cooldown Bars",        minval=1,   maxval=10,  step=1,   group="Risk")
+positionPct   = input.float(10,   "Position Size (%)",    minval=5,   maxval=25,  step=5,   group="Risk")
+
+// ==============================================================================
+// PREVIOUS DAY LEVELS — RTH high/low/close tracking
+// ==============================================================================
+
+var float prevDayHigh  = na
+var float prevDayLow   = na
+var float prevDayClose = na
+
+// Running RTH high/low/close (updated every RTH bar, frozen at next newRTH)
+var float rthHi        = na
+var float rthLo        = na
+var float lastRTHClose = na
+
+// Today's open for PDC gap detection
+var float todayOpen = na
+
+if newRTH
+    // Store yesterday's levels before resetting
+    if not na(rthHi)
+        prevDayHigh  := rthHi
+        prevDayLow   := rthLo
+    if not na(lastRTHClose)
+        prevDayClose := lastRTHClose
+    // Store today's open
+    todayOpen := open
+    // Reset running trackers
+    rthHi := high
+    rthLo := low
+
+if isRTH
+    rthHi      := math.max(nz(rthHi, high), high)
+    rthLo      := math.min(nz(rthLo, low), low)
+    lastRTHClose := close
+
+// ==============================================================================
+// SESSION VWAP — RTH-only running calculation
+// ==============================================================================
+
+var float vwapSum   = 0.0
+var float volSum    = 0.0
+var float sqDevSum  = 0.0
+var int   vwapBars  = 0
+
+if newRTH
+    vwapSum  := 0.0
+    volSum   := 0.0
+    sqDevSum := 0.0
+    vwapBars := 0
+
+if isRTH
+    vwapSum += hlc3 * volume
+    volSum  += volume
+    if volSum > 0
+        currentVwap = vwapSum / volSum
+        sqDevSum += math.pow(close - currentVwap, 2)
+        vwapBars += 1
+
+vwapVal  = volSum > 0 ? vwapSum / volSum : close
+vwapStdev = vwapBars > 1 ? math.sqrt(sqDevSum / vwapBars) : 0.0
+vwapUpper = vwapVal + vwapStdev
+vwapLower = vwapVal - vwapStdev
+
+// ==============================================================================
+// RSI
+// ==============================================================================
+
+rsiVal = ta.rsi(close, rsiLen)
+
+// ==============================================================================
+// VOLUME — current bar vs 20-bar SMA
+// ==============================================================================
+
+volAvg     = ta.sma(volume, 20)
+volCurrent = volume
+volRatio   = volAvg > 0 ? volCurrent / volAvg : 0.0
+
+// ==============================================================================
+// ZONE WIDTH — convert % of price to points
+// ==============================================================================
+
+zonePts = close * zonePct / 100.0
+
+// ==============================================================================
+// GAP DETECTION — for PDC fade
+// ==============================================================================
+
+gapPct = not na(prevDayClose) and not na(todayOpen) ? (todayOpen - prevDayClose) / prevDayClose * 100.0 : 0.0
+isGapUp   = gapPct > minGapPct
+isGapDown = gapPct < -minGapPct
+
+// ==============================================================================
+// COOLDOWN
+// ==============================================================================
+
+var int barsSinceExit = 100
+if strategy.position_size == 0 and strategy.position_size[1] != 0
+    barsSinceExit := 0
+else if strategy.position_size == 0
+    barsSinceExit += 1
+pastCooldown = barsSinceExit >= cooldownBars
+
+// ==============================================================================
+// DAILY TRADE FLAGS — each level trades only once per day
+// ==============================================================================
+
+var bool pdh_traded = false
+var bool pdl_traded = false
+var bool pdc_traded = false
+
+if newRTH
+    pdh_traded := false
+    pdl_traded := false
+    pdc_traded := false
+
+// ==============================================================================
+// RISK CALCULATIONS — stops and targets as points from price
+// ==============================================================================
+
+stopBufferPts   = close * stopPct / 100.0
+maxStopPts      = close * maxStopPct / 100.0
+minTargetPts    = close * minTargetPct / 100.0
+
+// ==============================================================================
+// COMMON GATES
+// ==============================================================================
+
+isFlat    = strategy.position_size == 0
+commonOK  = isRTH and isTradingWindow and entryAllowed and pastCooldown and isFlat
+
+// ==============================================================================
+// ZONE STATUS — for dashboard (computed every bar)
+// ==============================================================================
+
+// PDH zone status
+pdhInRange  = not na(prevDayHigh) and math.abs(close - prevDayHigh) <= zonePts * 3   // within 3x zone = "in range"
+pdhInZone   = not na(prevDayHigh) and high >= prevDayHigh - zonePts and close <= prevDayHigh + zonePts
+pdhStatus   = pdh_traded ? "TRADED" : pdhInZone ? "HIT" : pdhInRange ? "ACTIVE" : "OUT OF RANGE"
+
+// PDL zone status
+pdlInRange  = not na(prevDayLow) and math.abs(close - prevDayLow) <= zonePts * 3
+pdlInZone   = not na(prevDayLow) and low <= prevDayLow + zonePts and close >= prevDayLow - zonePts
+pdlStatus   = pdl_traded ? "TRADED" : pdlInZone ? "HIT" : pdlInRange ? "ACTIVE" : "OUT OF RANGE"
+
+// PDC zone status
+pdcInZone   = not na(prevDayClose) and ((high >= prevDayClose - zonePts and close <= prevDayClose + zonePts) or (low <= prevDayClose + zonePts and close >= prevDayClose - zonePts))
+pdcStatus   = not usePDC ? "OFF" : pdc_traded ? "TRADED" : not (isGapUp or isGapDown) ? "NO GAP" : pdcInZone ? "HIT" : "ACTIVE"
+
+// ==============================================================================
+// SIGNAL 1: PDH SHORT — fade at previous day's high
+// ==============================================================================
+
+pdhZoneHit = not na(prevDayHigh) and high >= prevDayHigh - zonePts and close <= prevDayHigh + zonePts
+pdhReject  = not na(prevDayHigh) and close < prevDayHigh
+pdhRSI     = rsiVal > rsiShortThresh
+pdhBearish = not requireRejCandle or (close < open)
+pdhVolOK   = volRatio >= volRatioMin
+
+// Stop and target
+pdhStop    = not na(prevDayHigh) ? prevDayHigh + stopBufferPts : na
+pdhTarget  = vwapVal
+pdhRisk    = not na(pdhStop) ? pdhStop - close : 0.0
+pdhDist    = close - vwapVal
+
+pdhRiskOK  = pdhRisk > 0 and pdhRisk <= maxStopPts and pdhDist >= minTargetPts
+
+pdhSignal  = commonOK and not pdh_traded and pdhZoneHit and pdhReject and pdhRSI and pdhBearish and pdhVolOK and pdhRiskOK
+
+// ==============================================================================
+// SIGNAL 2: PDL LONG — fade at previous day's low
+// ==============================================================================
+
+pdlZoneHit = not na(prevDayLow) and low <= prevDayLow + zonePts and close >= prevDayLow - zonePts
+pdlReject  = not na(prevDayLow) and close > prevDayLow
+pdlRSI     = rsiVal < rsiLongThresh
+pdlBullish = not requireRejCandle or (close > open)
+pdlVolOK   = volRatio >= volRatioMin
+
+// Stop and target
+pdlStop    = not na(prevDayLow) ? prevDayLow - stopBufferPts : na
+pdlTarget  = vwapVal
+pdlRisk    = not na(pdlStop) ? close - pdlStop : 0.0
+pdlDist    = vwapVal - close
+
+pdlRiskOK  = pdlRisk > 0 and pdlRisk <= maxStopPts and pdlDist >= minTargetPts
+
+pdlSignal  = commonOK and not pdl_traded and not pdhSignal and pdlZoneHit and pdlReject and pdlRSI and pdlBullish and pdlVolOK and pdlRiskOK
+
+// ==============================================================================
+// SIGNAL 3: PDC FADE — fade at previous day's close after gap
+// ==============================================================================
+
+// PDC SHORT: price rallying up to PDC from below after gap down
+pdcShortZone = not na(prevDayClose) and high >= prevDayClose - zonePts and close <= prevDayClose + zonePts
+pdcShortCond = isGapDown and pdcShortZone and (not requireRejCandle or close < open)
+
+pdcShortStop   = not na(prevDayClose) ? prevDayClose + stopBufferPts : na
+// Target: VWAP or opening price, whichever is closer and meets min distance
+pdcShortTargetVwap = vwapVal
+pdcShortTargetOpen = nz(todayOpen, close)
+pdcShortDistVwap   = close - pdcShortTargetVwap
+pdcShortDistOpen   = close - pdcShortTargetOpen
+// Pick closer target that meets minimum distance
+pdcShortTarget = pdcShortDistVwap >= minTargetPts and pdcShortDistOpen >= minTargetPts ? (pdcShortDistVwap <= pdcShortDistOpen ? pdcShortTargetVwap : pdcShortTargetOpen) : pdcShortDistVwap >= minTargetPts ? pdcShortTargetVwap : pdcShortDistOpen >= minTargetPts ? pdcShortTargetOpen : na
+
+pdcShortRisk   = not na(pdcShortStop) ? pdcShortStop - close : 0.0
+pdcShortDist   = not na(pdcShortTarget) ? close - pdcShortTarget : 0.0
+pdcShortRiskOK = pdcShortRisk > 0 and pdcShortRisk <= maxStopPts and pdcShortDist >= minTargetPts
+
+pdcShortSignal = commonOK and usePDC and not pdc_traded and not pdhSignal and not pdlSignal and pdcShortCond and pdcShortRiskOK
+
+// PDC LONG: price falling to PDC from above after gap up
+pdcLongZone = not na(prevDayClose) and low <= prevDayClose + zonePts and close >= prevDayClose - zonePts
+pdcLongCond = isGapUp and pdcLongZone and (not requireRejCandle or close > open)
+
+pdcLongStop   = not na(prevDayClose) ? prevDayClose - stopBufferPts : na
+// Target: VWAP or opening price, whichever is closer and meets min distance
+pdcLongTargetVwap = vwapVal
+pdcLongTargetOpen = nz(todayOpen, close)
+pdcLongDistVwap   = pdcLongTargetVwap - close
+pdcLongDistOpen   = pdcLongTargetOpen - close
+// Pick closer target that meets minimum distance
+pdcLongTarget = pdcLongDistVwap >= minTargetPts and pdcLongDistOpen >= minTargetPts ? (pdcLongDistVwap <= pdcLongDistOpen ? pdcLongTargetVwap : pdcLongTargetOpen) : pdcLongDistVwap >= minTargetPts ? pdcLongTargetVwap : pdcLongDistOpen >= minTargetPts ? pdcLongTargetOpen : na
+
+pdcLongRisk   = not na(pdcLongStop) ? close - pdcLongStop : 0.0
+pdcLongDist   = not na(pdcLongTarget) ? pdcLongTarget - close : 0.0
+pdcLongRiskOK = pdcLongRisk > 0 and pdcLongRisk <= maxStopPts and pdcLongDist >= minTargetPts
+
+pdcLongSignal = commonOK and usePDC and not pdc_traded and not pdhSignal and not pdlSignal and not pdcShortSignal and pdcLongCond and pdcLongRiskOK
+
+// ==============================================================================
+// UPDATE TRADE FLAGS
+// ==============================================================================
+
+if pdhSignal
+    pdh_traded := true
+if pdlSignal
+    pdl_traded := true
+if pdcShortSignal or pdcLongSignal
+    pdc_traded := true
+
+// ==============================================================================
+// EXECUTION
+// Priority: PDH > PDL > PDC (only one signal per bar enforced above)
+// ==============================================================================
+
+// PDH SHORT
+if pdhSignal
+    strategy.entry("PDH_S", strategy.short)
+    strategy.exit("PDH_SX", "PDH_S", stop=pdhStop, limit=pdhTarget)
+    alert("PDLF SHORT at PDH " + str.tostring(close, "#.##"), alert.freq_once_per_bar_close)
+
+// PDL LONG
+if pdlSignal
+    strategy.entry("PDL_L", strategy.long)
+    strategy.exit("PDL_LX", "PDL_L", stop=pdlStop, limit=pdlTarget)
+    alert("PDLF LONG at PDL " + str.tostring(close, "#.##"), alert.freq_once_per_bar_close)
+
+// PDC SHORT
+if pdcShortSignal
+    strategy.entry("PDC_S", strategy.short)
+    strategy.exit("PDC_SX", "PDC_S", stop=pdcShortStop, limit=pdcShortTarget)
+    alert("PDLF SHORT at PDC " + str.tostring(close, "#.##"), alert.freq_once_per_bar_close)
+
+// PDC LONG
+if pdcLongSignal
+    strategy.entry("PDC_L", strategy.long)
+    strategy.exit("PDC_LX", "PDC_L", stop=pdcLongStop, limit=pdcLongTarget)
+    alert("PDLF LONG at PDC " + str.tostring(close, "#.##"), alert.freq_once_per_bar_close)
+
+// Session flatten
+if isFlattenTime and strategy.position_size != 0
+    strategy.close_all("RTH End")
+    alert("PDLF FLATTEN " + str.tostring(close, "#.##"), alert.freq_once_per_bar_close)
+
+// ==============================================================================
+// VISUALS — Level Lines
+// ==============================================================================
+
+// PDH horizontal line (red, linewidth 2)
+pdhPlot = isRTH and not na(prevDayHigh) ? prevDayHigh : na
+plot(pdhPlot, "PDH", color.new(color.red, 0), 2, plot.style_stepline)
+
+// PDL horizontal line (green, linewidth 2)
+pdlPlot = isRTH and not na(prevDayLow) ? prevDayLow : na
+plot(pdlPlot, "PDL", color.new(color.green, 0), 2, plot.style_stepline)
+
+// PDC horizontal line (yellow, dashed)
+pdcPlot = isRTH and not na(prevDayClose) ? prevDayClose : na
+plot(pdcPlot, "PDC", color.new(color.yellow, 0), 2, plot.style_cross)
+
+// Session VWAP (purple, linewidth 2)
+vwapPlot = isRTH ? vwapVal : na
+plot(vwapPlot, "VWAP", color.new(color.purple, 0), 2)
+
+// VWAP +/- 1 stdev bands (purple, dotted, 80% transparency)
+vwapUpperPlot = isRTH and vwapStdev > 0 ? vwapUpper : na
+vwapLowerPlot = isRTH and vwapStdev > 0 ? vwapLower : na
+p_vu = plot(vwapUpperPlot, "VWAP+1sd", color.new(color.purple, 80), 1, plot.style_cross)
+p_vl = plot(vwapLowerPlot, "VWAP-1sd", color.new(color.purple, 80), 1, plot.style_cross)
+
+// Fill between VWAP bands (light purple, 90% transparency)
+fill(p_vu, p_vl, color.new(color.purple, 93))
+
+// Zone shading around PDH (very light red, 93% transparency)
+pdhZoneUpper = isRTH and not na(prevDayHigh) ? prevDayHigh + zonePts : na
+pdhZoneLower = isRTH and not na(prevDayHigh) ? prevDayHigh - zonePts : na
+p_pdhu = plot(pdhZoneUpper, "PDH Zone+", color.new(color.red, 100), display=display.none)
+p_pdhl = plot(pdhZoneLower, "PDH Zone-", color.new(color.red, 100), display=display.none)
+fill(p_pdhu, p_pdhl, color.new(color.red, 93))
+
+// Zone shading around PDL (very light green, 93% transparency)
+pdlZoneUpper = isRTH and not na(prevDayLow) ? prevDayLow + zonePts : na
+pdlZoneLower = isRTH and not na(prevDayLow) ? prevDayLow - zonePts : na
+p_pdlu = plot(pdlZoneUpper, "PDL Zone+", color.new(color.green, 100), display=display.none)
+p_pdll = plot(pdlZoneLower, "PDL Zone-", color.new(color.green, 100), display=display.none)
+fill(p_pdlu, p_pdll, color.new(color.green, 93))
+
+// Zone shading around PDC (very light yellow, 93% transparency)
+pdcZoneUpper = isRTH and not na(prevDayClose) ? prevDayClose + zonePts : na
+pdcZoneLower = isRTH and not na(prevDayClose) ? prevDayClose - zonePts : na
+p_pdcu = plot(pdcZoneUpper, "PDC Zone+", color.new(color.yellow, 100), display=display.none)
+p_pdcl = plot(pdcZoneLower, "PDC Zone-", color.new(color.yellow, 100), display=display.none)
+fill(p_pdcu, p_pdcl, color.new(color.yellow, 93))
+
+// Entry markers
+plotshape(pdhSignal,      "PDH Short",  shape.triangledown, location.abovebar, color.red,    size=size.small, text="PDH")
+plotshape(pdlSignal,      "PDL Long",   shape.triangleup,   location.belowbar, color.green,  size=size.small, text="PDL")
+plotshape(pdcShortSignal, "PDC Short",  shape.triangledown, location.abovebar, color.orange, size=size.small, text="PDC")
+plotshape(pdcLongSignal,  "PDC Long",   shape.triangleup,   location.belowbar, color.orange, size=size.small, text="PDC")
+
+// Background — outside RTH shaded
+bgcolor(not isRTH ? color.new(color.gray, 95) : na)
+
+// ==============================================================================
+// DASHBOARD (16 rows, top-right corner)
+// ==============================================================================
+
+var table t = table.new(position.top_right, 2, 16, color.new(color.black, 75))
+
+if barstate.islast
+    // Row 0: Header
+    table.cell(t, 0, 0, "PDLevel Fade", text_color=color.black, bgcolor=color.new(#FFB300, 0))
+    table.cell(t, 1, 0, "SPY 5m",       text_color=color.black, bgcolor=color.new(#FFB300, 0))
+
+    // Row 1: PDH
+    table.cell(t, 0, 1, "PDH", text_color=color.white)
+    table.cell(t, 1, 1, not na(prevDayHigh) ? str.tostring(prevDayHigh, "#.##") : "---", text_color=color.red)
+
+    // Row 2: PDL
+    table.cell(t, 0, 2, "PDL", text_color=color.white)
+    table.cell(t, 1, 2, not na(prevDayLow) ? str.tostring(prevDayLow, "#.##") : "---", text_color=color.green)
+
+    // Row 3: PDC
+    table.cell(t, 0, 3, "PDC", text_color=color.white)
+    table.cell(t, 1, 3, not na(prevDayClose) ? str.tostring(prevDayClose, "#.##") : "---", text_color=color.yellow)
+
+    // Row 4: VWAP
+    table.cell(t, 0, 4, "VWAP", text_color=color.white)
+    table.cell(t, 1, 4, str.tostring(vwapVal, "#.##"), text_color=color.purple)
+
+    // Row 5: Gap
+    gapText  = str.tostring(gapPct, "#.##") + "%"
+    gapColor = (isGapUp or isGapDown) ? color.yellow : color.gray
+    table.cell(t, 0, 5, "Gap", text_color=color.white)
+    table.cell(t, 1, 5, gapText, text_color=gapColor)
+
+    // Row 6: RSI
+    rsiColor = rsiVal > rsiShortThresh ? color.red : rsiVal < rsiLongThresh ? color.green : color.white
+    table.cell(t, 0, 6, "RSI(" + str.tostring(rsiLen) + ")", text_color=color.white)
+    table.cell(t, 1, 6, str.tostring(rsiVal, "#.#"), text_color=rsiColor)
+
+    // Row 7: Volume Ratio
+    vrColor = volRatio >= volRatioMin ? color.green : color.gray
+    table.cell(t, 0, 7, "Vol Ratio", text_color=color.white)
+    table.cell(t, 1, 7, str.tostring(volRatio, "#.##") + "x", text_color=vrColor)
+
+    // Row 8: PDH Zone
+    pdhZColor = pdhStatus == "HIT" ? color.yellow : pdhStatus == "ACTIVE" ? color.lime : pdhStatus == "TRADED" ? color.aqua : color.gray
+    table.cell(t, 0, 8, "PDH Zone", text_color=color.white)
+    table.cell(t, 1, 8, pdhStatus, text_color=pdhZColor)
+
+    // Row 9: PDL Zone
+    pdlZColor = pdlStatus == "HIT" ? color.yellow : pdlStatus == "ACTIVE" ? color.lime : pdlStatus == "TRADED" ? color.aqua : color.gray
+    table.cell(t, 0, 9, "PDL Zone", text_color=color.white)
+    table.cell(t, 1, 9, pdlStatus, text_color=pdlZColor)
+
+    // Row 10: PDC Zone
+    pdcZColor = pdcStatus == "HIT" ? color.yellow : pdcStatus == "ACTIVE" ? color.lime : pdcStatus == "TRADED" ? color.aqua : pdcStatus == "OFF" or pdcStatus == "NO GAP" ? color.gray : color.white
+    table.cell(t, 0, 10, "PDC Zone", text_color=color.white)
+    table.cell(t, 1, 10, pdcStatus, text_color=pdcZColor)
+
+    // Row 11: Session
+    sessText  = isOpening ? "OPENING" : isActive ? "ACTIVE" : isClosing ? "CLOSING" : "CLOSED"
+    sessColor = isActive ? color.green : isOpening ? color.yellow : isClosing ? color.orange : color.gray
+    table.cell(t, 0, 11, "Session", text_color=color.white)
+    table.cell(t, 1, 11, sessText, text_color=sessColor)
+
+    // Row 12: Filters
+    filterText  = skipFriday and isFriday ? "FRI-OFF" : "CLEAR"
+    filterColor = entryAllowed ? color.green : color.red
+    table.cell(t, 0, 12, "Filters", text_color=color.white)
+    table.cell(t, 1, 12, filterText, text_color=filterColor)
+
+    // Row 13: Cooldown
+    table.cell(t, 0, 13, "Cooldown", text_color=color.white)
+    table.cell(t, 1, 13, str.tostring(barsSinceExit) + "/" + str.tostring(cooldownBars), text_color=pastCooldown ? color.green : color.red)
+
+    // Row 14: Position
+    posText  = strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT"
+    posColor = strategy.position_size > 0 ? color.green : strategy.position_size < 0 ? color.red : color.gray
+    table.cell(t, 0, 14, "Position", text_color=color.white)
+    table.cell(t, 1, 14, posText, text_color=posColor)
+
+    // Row 15: Equity
+    table.cell(t, 0, 15, "Equity", text_color=color.white)
+    table.cell(t, 1, 15, "$" + str.tostring(strategy.equity, "#,###"), text_color=strategy.equity >= 100000 ? color.green : color.red)

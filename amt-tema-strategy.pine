@@ -1,12 +1,14 @@
-// AMT-TEMA Strategy v8
+// AMT-TEMA Strategy v8.1
 // Auction Market Theory + Triple EMA
 // For ES 5m chart | All inputs optimizable
 //
 // SETUPS:
 //   1. IB Breakout + TEMA — trend day SHORT entries after IB break (default short-only)
-//   2. Value Area Fade + TEMA Slope — mean reversion at VA edges (default OFF)
-//   3. 80% Rule + TEMA — open outside VA, re-enter and traverse (default OFF)
+//   2. IB Rejection (Wide Days) — fade IB high on wide IB days, target IB low (default ON)
+//   3. Value Area Fade + TEMA Slope — mean reversion at VA edges (default OFF)
+//   4. 80% Rule + TEMA — open outside VA, re-enter and traverse (default OFF)
 //
+// v8.1: Added IB Rejection on wide days (walk-forward PASS, PF ratio 0.78)
 // v8:  2-year Databento validation (Feb 2024 - Feb 2026, 140,966 bars)
 //      - Short-only mode (longs lose -$5,589 over 2yr — dead weight)
 //      - 30bps percentage-based stop (scales with ES price: 15pt at 5000, 20pt at 6800)
@@ -15,7 +17,7 @@
 // v7:  1-year data-driven optimization (no VA, skip Friday, noon blackout)
 // v6.1: maxIBRange 25→80, ibMaxStopPts 20pt cap, removed Day Type/volOK on IB
 //@version=6
-strategy(title="AMT-TEMA v8", shorttitle="AMT-TEMA-v8", overlay=true, pyramiding=0, initial_capital=100000, currency=currency.USD, default_qty_type=strategy.fixed, default_qty_value=1, commission_type=strategy.commission.cash_per_contract, commission_value=2.50, slippage=1, margin_long=5, margin_short=5)
+strategy(title="AMT-TEMA v8.1", shorttitle="AMT-v8.1", overlay=true, pyramiding=0, initial_capital=100000, currency=currency.USD, default_qty_type=strategy.fixed, default_qty_value=1, commission_type=strategy.commission.cash_per_contract, commission_value=2.50, slippage=1, margin_long=5, margin_short=5)
 
 // ══════════════════════════════════════════════════════════════════════════════
 // TEMA ENGINE
@@ -302,7 +304,45 @@ ibSL_S = math.min(ibRawSL_S, close + ibMaxStopDyn)
 ibTP_S = close - math.max(ibRange, ibMinTarget)
 
 // ══════════════════════════════════════════════════════════════════════════════
-// SETUP 2: VALUE AREA FADE + TEMA SLOPE
+// SETUP 2: IB REJECTION (Wide Days Only)
+// Short at IB high zone on wide IB days — fade resistance, target IB low
+// Walk-forward PASS: OOS PF 1.78, PF ratio 0.78, p=0.003
+// The wide-day filter IS the entire edge (wide PF 2.97 vs normal PF 0.76)
+// ══════════════════════════════════════════════════════════════════════════════
+
+useIBReject     = input.bool(true, "Enable IB Rejection", group="IB Rejection")
+rejZonePts      = input.float(5.0, "Zone (pts from IB High)", minval=2, maxval=15, step=1, group="IB Rejection", tooltip="Bar high must reach within this distance of IB high")
+rejStopBuffer   = input.float(8.0, "Stop Buffer (pts above IB High)", minval=2, maxval=20, step=1, group="IB Rejection")
+maxRejTrades    = input.int(8, "Max REJ Trades/Day", minval=1, maxval=12, step=1, group="IB Rejection")
+rejWideOnly     = input.bool(true, "Wide IB Days Only", group="IB Rejection", tooltip="CRITICAL: Only take rejections when IB range >= 1.2x average. This IS the edge.")
+
+// Trade counter (reset daily)
+var int rejTradesS = 0
+if newRTH
+    rejTradesS := 0
+
+// Zone check: bar high reaches within rejZonePts of IB high
+rejZoneFloor = nz(ibHigh, close) - rejZonePts
+rejInZone    = high >= rejZoneFloor
+
+// Target: IB Low (the ONLY profitable target — VWAP/mid/POC all lose money)
+rejTP_S = nz(ibLow, close - 10)
+rejTargetValid = math.abs(close - rejTP_S) >= 5  // at least 5pt to target
+
+// Stop: above IB high by buffer (structural — beyond the resistance level)
+rejSL_S = nz(ibHigh, close) + rejStopBuffer
+
+// Signal: short-only, wide IB day, bar touches IB high zone, after IB done
+rejDayTypeOK = not rejWideOnly or isWideIB
+// IB Breakout has priority — don't fire REJ on same bar as IB breakout
+rejNoIBConflict = not ibShortSignal and not ibLongSignal
+rejShortSignal = allowShorts and useIBReject and ibDone and rejInZone and rejTargetValid and rejDayTypeOK and rejNoIBConflict and isTradingWindow and entryAllowed and pastCooldown and strategy.position_size == 0 and rejTradesS < maxRejTrades
+
+if rejShortSignal
+    rejTradesS += 1
+
+// ══════════════════════════════════════════════════════════════════════════════
+// SETUP 3: VALUE AREA FADE + TEMA SLOPE
 // Day type filter: prefer wide/normal IB days (rotational, fades work)
 // ══════════════════════════════════════════════════════════════════════════════
 
@@ -347,7 +387,7 @@ if vaShortSignal
     vaTradesS += 1
 
 // ══════════════════════════════════════════════════════════════════════════════
-// SETUP 3: 80% RULE + TEMA
+// SETUP 4: 80% RULE + TEMA
 // Open outside prev VA, price re-enters → traverse to opposite VA edge
 // ~80% historical success rate in auction theory
 // ══════════════════════════════════════════════════════════════════════════════
@@ -435,7 +475,12 @@ if ibShortSignal
     strategy.entry("IB_S", strategy.short, alert_message=pmtMsg("sell", ibSL_S, ibTP_S))
     strategy.exit("IB_SX", "IB_S", stop=ibSL_S, limit=ibTP_S, alert_message=pmtCloseMsg())
 
-// Setup 2: VA Fade
+// Setup 2: IB Rejection
+if rejShortSignal
+    strategy.entry("REJ_S", strategy.short, alert_message=pmtMsg("sell", rejSL_S, rejTP_S))
+    strategy.exit("REJ_SX", "REJ_S", stop=rejSL_S, limit=rejTP_S, alert_message=pmtCloseMsg())
+
+// Setup 3: VA Fade
 if vaLongSignal
     strategy.entry("VA_L", strategy.long, alert_message=pmtMsg("buy", vaSL_L, vaTP_L))
     strategy.exit("VA_LX", "VA_L", stop=vaSL_L, limit=vaTP_L, alert_message=pmtCloseMsg())
@@ -444,7 +489,7 @@ if vaShortSignal
     strategy.entry("VA_S", strategy.short, alert_message=pmtMsg("sell", vaSL_S, vaTP_S))
     strategy.exit("VA_SX", "VA_S", stop=vaSL_S, limit=vaTP_S, alert_message=pmtCloseMsg())
 
-// Setup 3: 80% Rule
+// Setup 4: 80% Rule
 if eightyLongSignal
     strategy.entry("80_L", strategy.long, alert_message=pmtMsg("buy", eightySL_L, eightyTP_L))
     strategy.exit("80_LX", "80_L", stop=eightySL_L, limit=eightyTP_L, alert_message=pmtCloseMsg())
@@ -482,6 +527,7 @@ plot(vwapVal, "VWAP", color.new(color.purple, 20), 2)
 // Entry signals
 plotshape(ibLongSignal,    "IB Long",   shape.triangleup,    location.belowbar, color.lime,    size=size.small)
 plotshape(ibShortSignal,   "IB Short",  shape.triangledown,  location.abovebar, color.red,     size=size.small)
+plotshape(rejShortSignal and rejTargetValid, "REJ Short", shape.xcross, location.abovebar, color.new(color.fuchsia, 0), size=size.small)
 plotshape(vaLongSignal,    "VA Long",   shape.circle,        location.belowbar, color.green,   size=size.small)
 plotshape(vaShortSignal,   "VA Short",  shape.circle,        location.abovebar, color.orange,  size=size.small)
 plotshape(eightyLongSignal,  "80% Long",  shape.diamond,     location.belowbar, color.aqua,    size=size.small)
@@ -494,9 +540,9 @@ bgcolor(not isRTH ? color.new(color.gray, 95) : isIBPeriod ? color.new(color.blu
 // DASHBOARD
 // ══════════════════════════════════════════════════════════════════════════════
 
-var table t = table.new(position.top_right, 2, 18, color.new(color.black, 75))
+var table t = table.new(position.top_right, 2, 20, color.new(color.black, 75))
 if barstate.islast
-    table.cell(t, 0, 0, "AMT-TEMA v8", text_color=color.black, bgcolor=color.orange)
+    table.cell(t, 0, 0, "AMT-TEMA v8.1", text_color=color.black, bgcolor=color.orange)
     table.cell(t, 1, 0, "", bgcolor=color.orange)
 
     table.cell(t, 0, 1, "TEMA", text_color=color.white)
@@ -563,8 +609,13 @@ if barstate.islast
     eightyColor = not useEighty ? color.gray : eightyConfirmed ? color.lime : eightyReentered ? color.yellow : not (openAboveVA or openBelowVA) ? color.gray : color.white
     table.cell(t, 1, 15, eightyStatus, text_color=eightyColor)
 
-    table.cell(t, 0, 16, "Trades Today", text_color=color.white)
-    table.cell(t, 1, 16, "IB:" + str.tostring(ibTradesL + ibTradesS) + " VA:" + str.tostring(vaTradesL + vaTradesS) + " 80:" + str.tostring(eightyTradesL + eightyTradesS), text_color=color.aqua)
+    table.cell(t, 0, 16, "IB Reject", text_color=color.white)
+    rejStatusText = not useIBReject ? "OFF" : not ibDone ? "---" : not rejDayTypeOK ? "SKIP (not wide)" : rejInZone ? "IN ZONE" : "WATCHING"
+    rejStatusColor = not useIBReject ? color.gray : rejInZone and rejDayTypeOK ? color.fuchsia : rejDayTypeOK ? color.white : color.gray
+    table.cell(t, 1, 16, rejStatusText, text_color=rejStatusColor)
 
-    table.cell(t, 0, 17, "Capital", text_color=color.white)
-    table.cell(t, 1, 17, "$" + str.tostring(strategy.equity, "#,###"), text_color=strategy.equity >= 100000 ? color.green : color.red)
+    table.cell(t, 0, 17, "Trades Today", text_color=color.white)
+    table.cell(t, 1, 17, "IB:" + str.tostring(ibTradesL + ibTradesS) + " REJ:" + str.tostring(rejTradesS) + " VA:" + str.tostring(vaTradesL + vaTradesS) + " 80:" + str.tostring(eightyTradesL + eightyTradesS), text_color=color.aqua)
+
+    table.cell(t, 0, 18, "Capital", text_color=color.white)
+    table.cell(t, 1, 18, "$" + str.tostring(strategy.equity, "#,###"), text_color=strategy.equity >= 100000 ? color.green : color.red)

@@ -12,7 +12,7 @@ from .config import StrategyConfig
 from .indicators import compute_indicators
 from .session import SessionState, update_session
 from .position import Position, Trade
-from .setups import ib_breakout, ib_rejection, level_rejection, va_fade, eighty_rule, tema_cross
+from .setups import ib_breakout, ib_rejection, level_rejection, va_fade, eighty_rule, tema_cross, va_rotation, post_trend_fade, market_structure, failed_auction, overnight_sweep
 
 
 def run_backtest(df: pd.DataFrame, cfg: StrategyConfig, regime_filter=None,
@@ -54,6 +54,9 @@ def run_backtest(df: pd.DataFrame, cfg: StrategyConfig, regime_filter=None,
         # ── Level state tracking (must run every bar, even in position) ──
         level_rejection.update_level_state(bar, state, cfg)
         level_rejection.update_support_level_state(bar, state, cfg)
+
+        # ── Failed Auction state tracking (must run every bar) ──
+        failed_auction.update_state(bar, state, cfg)
 
         # ── Cooldown tracking ──
         # Match Pine: if position_size==0 and position_size[1]!=0 → just exited
@@ -110,8 +113,10 @@ def run_backtest(df: pd.DataFrame, cfg: StrategyConfig, regime_filter=None,
             time_ok = not (in_blackout or (cfg.skip_friday and is_friday))
 
             if regime_ok and time_ok:
-                # Priority: IB Breakout > IB Rejection > Level Rejection Short > Level Rejection Long > VA Fade > 80% Rule > TEMA Cross
-                signal = ib_breakout.check_signal(bar, prev_bar, state, cfg)
+                # Priority: Overnight Sweep > IB Breakout > IB Rejection > Level Rejection > ...
+                signal = overnight_sweep.check_signal(bar, prev_bar, state, cfg)
+                if signal is None:
+                    signal = ib_breakout.check_signal(bar, prev_bar, state, cfg)
                 if signal is None:
                     signal = ib_rejection.check_signal(bar, prev_bar, state, cfg)
                 if signal is None:
@@ -124,6 +129,14 @@ def run_backtest(df: pd.DataFrame, cfg: StrategyConfig, regime_filter=None,
                     signal = eighty_rule.check_signal(bar, prev_bar, state, cfg)
                 if signal is None:
                     signal = tema_cross.check_signal(bar, prev_bar, state, cfg)
+                if signal is None:
+                    signal = va_rotation.check_signal(bar, prev_bar, state, cfg)
+                if signal is None:
+                    signal = post_trend_fade.check_signal(bar, prev_bar, state, cfg)
+                if signal is None:
+                    signal = failed_auction.check_signal(bar, prev_bar, state, cfg)
+                if signal is None:
+                    signal = market_structure.check_signal(bar, prev_bar, state, cfg)
 
             # Level Rejection gets its own shot if time filters blocked above
             if regime_ok and not time_ok and signal is None:
@@ -138,6 +151,13 @@ def run_backtest(df: pd.DataFrame, cfg: StrategyConfig, regime_filter=None,
                     signal = None
                 elif cfg.direction_filter == "long" and signal["direction"] == -1:
                     signal = None
+
+            # VWAP filter: block shorts below VWAP (institutional flow alignment)
+            if signal is not None and cfg.use_vwap_filter:
+                if signal["direction"] == -1 and state.rth_vol_sum > 0:
+                    current_vwap = state.rth_vwap_sum / state.rth_vol_sum
+                    if bar["close"] < current_vwap:
+                        signal = None
 
             if signal is not None:
                 # Compute trail params for this entry (v9)

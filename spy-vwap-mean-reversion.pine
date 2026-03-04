@@ -1,0 +1,378 @@
+// SPY VWAP Mean Reversion Strategy
+// Intraday mean reversion from VWAP standard deviation bands
+// For SPY 5m chart | All inputs optimizable
+//
+// CONCEPT:
+//   SPY oscillates around VWAP throughout the day. When price reaches
+//   extreme deviations (1-2 stdev from VWAP), it tends to revert to the mean.
+//   This is the most traded institutional intraday strategy.
+//
+// SETUPS:
+//   LONG: price touches/crosses below Lower Band 1 with RSI oversold, reverts back
+//         OR price touches Lower Band 2 (extreme) = immediate entry
+//   SHORT: price touches/crosses above Upper Band 1 with RSI overbought, reverts back
+//          OR price touches Upper Band 2 (extreme) = immediate entry
+//
+// TARGETS:
+//   Primary: VWAP (full mean reversion)
+//   Band 2 entries: first target at Band 1 (partial reversion)
+//
+// FILTERS:
+//   Skip Friday (default ON), Noon blackout (default OFF)
+//   ADX < 40 (trend too strong for mean reversion)
+//   Min band width (stdev must be meaningful)
+//   No trades in first 15 min (let VWAP establish)
+//   Max stop 1.5% (skip if stop too wide)
+//   Min target 0.15% (skip if target too small)
+//
+//@version=6
+strategy(title="VWAP MR", shorttitle="VWAP-MR", overlay=true, pyramiding=0, initial_capital=100000, currency=currency.USD, default_qty_type=strategy.fixed, default_qty_value=1, commission_type=strategy.commission.cash_per_order, commission_value=1.00, slippage=1)
+
+// ==============================================================================
+// SESSION & TIME (Eastern Time)
+// ==============================================================================
+
+etHour   = hour(time, "America/New_York")
+etMinute = minute(time, "America/New_York")
+etTime   = etHour * 100 + etMinute
+
+rthStart = 930
+rthEnd   = 1600
+
+// Session inputs
+tradeStartTime = input.int(945,  "Trade Start (ET)", minval=930,  maxval=1030, step=5,  group="Session", tooltip="Default 9:45 — 15 min after open to let VWAP establish")
+tradeEndTime   = input.int(1500, "Trade End (ET)",   minval=1400, maxval=1555, step=5,  group="Session", tooltip="No new entries after this time — insufficient time for reversion")
+flattenTime    = input.int(1555, "Flatten Time (ET)", minval=1530, maxval=1600, step=5, group="Session")
+skipFriday     = input.bool(true, "Skip Fridays", group="Session")
+noonBlackout   = input.bool(false, "Noon Blackout (12:00-13:00)", group="Session", tooltip="Skip signals during lunch hour chop")
+
+// Derived session flags
+isRTH           = etTime >= rthStart and etTime < rthEnd
+newRTH          = isRTH and not isRTH[1]
+isTradingWindow = etTime >= tradeStartTime and etTime < tradeEndTime
+inBlackout      = noonBlackout and etTime >= 1200 and etTime < 1300
+
+// Friday detection
+isFriday    = dayofweek(time, "America/New_York") == dayofweek.friday
+entryAllowed = not (skipFriday and isFriday) and not inBlackout
+
+// Session state for dashboard
+sessionState = not isRTH ? "CLOSED" : etTime >= flattenTime ? "CLOSING" : isTradingWindow ? "ACTIVE" : "WAIT"
+
+// ==============================================================================
+// VWAP COMPUTATION (RTH-only, reset daily)
+// Running VWAP + running standard deviation from VWAP
+// ==============================================================================
+
+// VWAP band inputs
+vwapBand1Mult = input.float(1.0, "Band 1 Multiplier", minval=0.5, maxval=3.0, step=0.1, group="VWAP", tooltip="Standard deviation multiplier for inner bands")
+vwapBand2Mult = input.float(2.0, "Band 2 Multiplier", minval=1.0, maxval=4.0, step=0.1, group="VWAP", tooltip="Standard deviation multiplier for outer bands (extreme)")
+minBandWidth  = input.float(0.1, "Min Band Width (%)", minval=0.05, maxval=0.5, step=0.05, group="VWAP", tooltip="Minimum stdev as % of price — skip signals if bands too tight")
+
+// Running VWAP components for RTH session
+var float rthVwapSum = 0.0
+var float rthVolSum  = 0.0
+var float rthSqDev   = 0.0
+var int   rthBars    = 0
+
+if newRTH
+    // Reset for new session
+    rthVwapSum := 0.0
+    rthVolSum  := 0.0
+    rthSqDev   := 0.0
+    rthBars    := 0
+
+if isRTH
+    rthVwapSum += hlc3 * volume
+    rthVolSum  += volume
+    // Running stdev: accumulate squared deviation from running VWAP
+    if rthVolSum > 0
+        currentVWAP = rthVwapSum / rthVolSum
+        rthSqDev += math.pow(close - currentVWAP, 2)
+        rthBars  += 1
+
+// Current VWAP and standard deviation
+vwapVal     = rthVolSum > 0 ? rthVwapSum / rthVolSum : close
+vwapStdev   = rthBars > 1 ? math.sqrt(rthSqDev / rthBars) : 0.0
+stdevPct    = vwapVal > 0 ? (vwapStdev / vwapVal) * 100.0 : 0.0
+
+// VWAP Bands
+upperBand1 = vwapVal + vwapBand1Mult * vwapStdev
+upperBand2 = vwapVal + vwapBand2Mult * vwapStdev
+lowerBand1 = vwapVal - vwapBand1Mult * vwapStdev
+lowerBand2 = vwapVal - vwapBand2Mult * vwapStdev
+
+// Band width filter — are the bands meaningful?
+bandsWideEnough = stdevPct >= minBandWidth
+
+// ==============================================================================
+// RSI
+// ==============================================================================
+
+rsiLen        = input.int(14, "RSI Length",      minval=5,  maxval=30, step=1, group="Entry")
+rsiOversold   = input.int(35, "RSI Oversold",   minval=20, maxval=45, step=5, group="Entry")
+rsiOverbought = input.int(65, "RSI Overbought", minval=55, maxval=80, step=5, group="Entry")
+
+rsiVal = ta.rsi(close, rsiLen)
+
+// ==============================================================================
+// ADX FILTER
+// ==============================================================================
+
+maxADX       = input.int(40,   "Max ADX",           minval=20, maxval=60, step=5,  group="Entry", tooltip="Skip if ADX above this — trend too strong for mean reversion")
+useADXFilter = input.bool(true, "Use ADX Filter",   group="Entry")
+
+// ADX calculation (standard DI+/DI-/ADX)
+adxLen = 14
+[diPlus, diMinus, adxVal] = ta.dmi(adxLen, adxLen)
+
+adxOK = not useADXFilter or adxVal < maxADX
+
+// ==============================================================================
+// ENTRY MODE
+// ==============================================================================
+
+useBand2Immediate = input.bool(true, "Band 2 Immediate Entry", group="Entry", tooltip="Enter immediately at Band 2 without waiting for confirmation bar")
+
+// ==============================================================================
+// RISK MANAGEMENT
+// ==============================================================================
+
+maxStopPct   = input.float(1.5,  "Max Stop (%)",        minval=0.5, maxval=3.0, step=0.1, group="Risk", tooltip="Maximum stop loss as % of price — skip trade if wider")
+stopBandMult = input.float(2.5,  "Stop Band Mult",      minval=1.5, maxval=4.0, step=0.5, group="Risk", tooltip="Stop at VWAP +/- this * stdev")
+minTargetPct = input.float(0.15, "Min Target (%)",      minval=0.05, maxval=0.5, step=0.05, group="Risk", tooltip="Minimum target distance as % of price — skip if too small")
+cooldownBars = input.int(3,      "Cooldown Bars",        minval=1, maxval=10, step=1, group="Risk")
+positionPct  = input.float(10,   "Position Size (%)",    minval=5, maxval=25, step=5, group="Risk", tooltip="% of equity per trade")
+
+// ==============================================================================
+// COOLDOWN TRACKING
+// ==============================================================================
+
+var int barsSinceExit = 100
+if strategy.position_size == 0 and strategy.position_size[1] != 0
+    barsSinceExit := 0
+else if strategy.position_size == 0
+    barsSinceExit += 1
+pastCooldown = barsSinceExit >= cooldownBars
+
+// ==============================================================================
+// TRADE COUNTER (reset daily)
+// ==============================================================================
+
+var int dayTrades = 0
+if newRTH
+    dayTrades := 0
+
+// ==============================================================================
+// SIGNAL STATE TRACKING
+// Track when price touches Band 1 for confirmation on next bar
+// ==============================================================================
+
+var bool touchedLowerBand1 = false
+var bool touchedUpperBand1 = false
+
+// Reset touches each session
+if newRTH
+    touchedLowerBand1 := false
+    touchedUpperBand1 := false
+
+// Detect Band 1 touches (close crosses or touches the band)
+if isRTH and rthBars > 1
+    if close <= lowerBand1
+        touchedLowerBand1 := true
+    if close >= upperBand1
+        touchedUpperBand1 := true
+
+// Clear touch flags when price reverts back past VWAP (no longer relevant)
+if close > vwapVal
+    touchedLowerBand1 := false
+if close < vwapVal
+    touchedUpperBand1 := false
+
+// ==============================================================================
+// ENTRY SIGNALS
+// ==============================================================================
+
+isFlat = strategy.position_size == 0
+
+// --- Common gates ---
+commonGates = isRTH and isTradingWindow and entryAllowed and pastCooldown and isFlat and bandsWideEnough and adxOK
+
+// --- LONG: Mean reversion from below ---
+// Confirmation entry: touched Band 1 on previous bar(s), now closing back above it
+longConfirm = touchedLowerBand1[1] and close > lowerBand1 and rsiVal < rsiOversold
+
+// Immediate entry: price at or below Band 2 (extreme oversold)
+longImmediate = useBand2Immediate and close <= lowerBand2 and rsiVal < rsiOversold
+
+// Calculate long stop and target
+longStop_raw    = vwapVal - stopBandMult * vwapStdev
+longStopDist    = close - longStop_raw
+longStopPct     = close > 0 ? (longStopDist / close) * 100.0 : 0.0
+longStopOK      = longStopPct > 0 and longStopPct <= maxStopPct
+
+// Target: VWAP for Band 1 entries, Band 1 for Band 2 entries
+longTarget_raw  = longImmediate ? lowerBand1 : vwapVal
+longTargetDist  = longTarget_raw - close
+longTargetPct   = close > 0 ? (longTargetDist / close) * 100.0 : 0.0
+longTargetOK    = longTargetPct >= minTargetPct
+
+longSignal = commonGates and (longConfirm or longImmediate) and longStopOK and longTargetOK
+
+// --- SHORT: Mean reversion from above ---
+// Confirmation entry: touched Band 1 on previous bar(s), now closing back below it
+shortConfirm = touchedUpperBand1[1] and close < upperBand1 and rsiVal > rsiOverbought
+
+// Immediate entry: price at or above Band 2 (extreme overbought)
+shortImmediate = useBand2Immediate and close >= upperBand2 and rsiVal > rsiOverbought
+
+// Calculate short stop and target
+shortStop_raw   = vwapVal + stopBandMult * vwapStdev
+shortStopDist   = shortStop_raw - close
+shortStopPct    = close > 0 ? (shortStopDist / close) * 100.0 : 0.0
+shortStopOK     = shortStopPct > 0 and shortStopPct <= maxStopPct
+
+// Target: VWAP for Band 1 entries, Band 1 for Band 2 entries
+shortTarget_raw = shortImmediate ? upperBand1 : vwapVal
+shortTargetDist = close - shortTarget_raw
+shortTargetPct  = close > 0 ? (shortTargetDist / close) * 100.0 : 0.0
+shortTargetOK   = shortTargetPct >= minTargetPct
+
+shortSignal = commonGates and (shortConfirm or shortImmediate) and shortStopOK and shortTargetOK
+
+// ==============================================================================
+// EXECUTION
+// ==============================================================================
+
+// Calculate position size in shares from % of equity
+qtyShares = math.floor((strategy.equity * positionPct / 100.0) / close)
+
+if longSignal and qtyShares > 0
+    strategy.entry("LONG", strategy.long, qty=qtyShares, alert_message="VWAP_MR LONG entry at " + str.tostring(close, "#.##"))
+    strategy.exit("LONG_X", "LONG", stop=longStop_raw, limit=longTarget_raw, alert_message="VWAP_MR LONG exit at " + str.tostring(close, "#.##"))
+    dayTrades += 1
+
+if shortSignal and qtyShares > 0
+    strategy.entry("SHORT", strategy.short, qty=qtyShares, alert_message="VWAP_MR SHORT entry at " + str.tostring(close, "#.##"))
+    strategy.exit("SHORT_X", "SHORT", stop=shortStop_raw, limit=shortTarget_raw, alert_message="VWAP_MR SHORT exit at " + str.tostring(close, "#.##"))
+    dayTrades += 1
+
+// Session flatten
+if etTime >= flattenTime and strategy.position_size != 0
+    strategy.close_all("RTH End", alert_message="VWAP_MR FLATTEN at " + str.tostring(close, "#.##"))
+
+// ==============================================================================
+// ALERT CONDITIONS (using alert() for strategies — alertcondition() is for indicators only)
+// ==============================================================================
+
+if longSignal
+    alert("VWAP_MR LONG entry at " + str.tostring(close, "#.##"), alert.freq_once_per_bar_close)
+if shortSignal
+    alert("VWAP_MR SHORT entry at " + str.tostring(close, "#.##"), alert.freq_once_per_bar_close)
+if etTime >= flattenTime and strategy.position_size != 0
+    alert("VWAP_MR FLATTEN at " + str.tostring(close, "#.##"), alert.freq_once_per_bar_close)
+
+// ==============================================================================
+// VISUALS — VWAP + Bands
+// ==============================================================================
+
+// Only plot during RTH when VWAP is established
+vwapPlot = isRTH and rthBars > 1 ? vwapVal : na
+ub1Plot  = isRTH and rthBars > 1 ? upperBand1 : na
+ub2Plot  = isRTH and rthBars > 1 ? upperBand2 : na
+lb1Plot  = isRTH and rthBars > 1 ? lowerBand1 : na
+lb2Plot  = isRTH and rthBars > 1 ? lowerBand2 : na
+
+// VWAP line (purple, linewidth 2)
+plot(vwapPlot, "VWAP", color.new(color.purple, 0), 2)
+
+// Band 1 upper/lower (blue, dotted)
+p_ub1 = plot(ub1Plot, "Upper Band 1", color.new(color.blue, 30), 1, plot.style_line)
+p_lb1 = plot(lb1Plot, "Lower Band 1", color.new(color.blue, 30), 1, plot.style_line)
+
+// Band 2 upper/lower (red, dotted)
+p_ub2 = plot(ub2Plot, "Upper Band 2", color.new(color.red, 30), 1, plot.style_line)
+p_lb2 = plot(lb2Plot, "Lower Band 2", color.new(color.red, 30), 1, plot.style_line)
+
+// Fill between Band 1 lines (light blue, 85% transparency)
+fill(p_ub1, p_lb1, color.new(color.blue, 85), title="Band 1 Fill")
+
+// Fill between Band 2 upper and Band 1 upper (light red, 90% transparency)
+fill(p_ub2, p_ub1, color.new(color.red, 90), title="Upper Band 2 Fill")
+
+// Fill between Band 2 lower and Band 1 lower (light red, 90% transparency)
+fill(p_lb2, p_lb1, color.new(color.red, 90), title="Lower Band 2 Fill")
+
+// Entry markers
+plotshape(longSignal,  "Long Entry",  shape.triangleup,   location.belowbar, color.green, size=size.small)
+plotshape(shortSignal, "Short Entry", shape.triangledown, location.abovebar, color.red,   size=size.small)
+
+// Background — non-RTH dimmed
+bgcolor(not isRTH ? color.new(color.gray, 95) : na)
+
+// ==============================================================================
+// DASHBOARD (table in top-right corner, 13 rows)
+// ==============================================================================
+
+var table dash = table.new(position.top_right, 2, 13, color.new(color.black, 75))
+
+if barstate.islast
+    // Row 0: Header
+    table.cell(dash, 0, 0, "VWAP MR", text_color=color.black, bgcolor=color.aqua)
+    table.cell(dash, 1, 0, "SPY 5m",  text_color=color.black, bgcolor=color.aqua)
+
+    // Row 1: VWAP value
+    table.cell(dash, 0, 1, "VWAP", text_color=color.white)
+    table.cell(dash, 1, 1, str.tostring(vwapVal, "#.##"), text_color=color.purple)
+
+    // Row 2: Upper bands
+    table.cell(dash, 0, 2, "Upper B1/B2", text_color=color.white)
+    table.cell(dash, 1, 2, str.tostring(upperBand1, "#.##") + " / " + str.tostring(upperBand2, "#.##"), text_color=color.blue)
+
+    // Row 3: Lower bands
+    table.cell(dash, 0, 3, "Lower B1/B2", text_color=color.white)
+    table.cell(dash, 1, 3, str.tostring(lowerBand1, "#.##") + " / " + str.tostring(lowerBand2, "#.##"), text_color=color.blue)
+
+    // Row 4: Stdev (% of price) — yellow if < minBandWidth
+    table.cell(dash, 0, 4, "Stdev (%)", text_color=color.white)
+    stdevColor = stdevPct < minBandWidth ? color.yellow : color.green
+    table.cell(dash, 1, 4, str.tostring(stdevPct, "#.###") + "%", text_color=stdevColor)
+
+    // Row 5: RSI — red if overbought, green if oversold, white otherwise
+    table.cell(dash, 0, 5, "RSI(" + str.tostring(rsiLen) + ")", text_color=color.white)
+    rsiColor = rsiVal > rsiOverbought ? color.red : rsiVal < rsiOversold ? color.green : color.white
+    table.cell(dash, 1, 5, str.tostring(rsiVal, "#.#"), text_color=rsiColor)
+
+    // Row 6: ADX — red if > maxADX
+    table.cell(dash, 0, 6, "ADX(14)", text_color=color.white)
+    adxColor = adxVal > maxADX ? color.red : color.green
+    table.cell(dash, 1, 6, str.tostring(adxVal, "#.#"), text_color=adxColor)
+
+    // Row 7: Session state
+    table.cell(dash, 0, 7, "Session", text_color=color.white)
+    sessColor = sessionState == "ACTIVE" ? color.green : sessionState == "WAIT" ? color.yellow : sessionState == "CLOSING" ? color.orange : color.gray
+    table.cell(dash, 1, 7, sessionState, text_color=sessColor)
+
+    // Row 8: Filters
+    table.cell(dash, 0, 8, "Filters", text_color=color.white)
+    filterText = skipFriday and isFriday ? "FRI-OFF" : inBlackout ? "NOON-OFF" : "CLEAR"
+    filterColor = entryAllowed ? color.green : color.red
+    table.cell(dash, 1, 8, filterText, text_color=filterColor)
+
+    // Row 9: Cooldown
+    table.cell(dash, 0, 9, "Cooldown", text_color=color.white)
+    table.cell(dash, 1, 9, str.tostring(barsSinceExit) + "/" + str.tostring(cooldownBars), text_color=pastCooldown ? color.green : color.red)
+
+    // Row 10: Position
+    table.cell(dash, 0, 10, "Position", text_color=color.white)
+    posText = strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT"
+    posColor = strategy.position_size > 0 ? color.green : strategy.position_size < 0 ? color.red : color.gray
+    table.cell(dash, 1, 10, posText, text_color=posColor)
+
+    // Row 11: Day's trades count
+    table.cell(dash, 0, 11, "Day Trades", text_color=color.white)
+    table.cell(dash, 1, 11, str.tostring(dayTrades), text_color=color.aqua)
+
+    // Row 12: Equity
+    table.cell(dash, 0, 12, "Equity", text_color=color.white)
+    table.cell(dash, 1, 12, "$" + str.tostring(strategy.equity, "#,###"), text_color=strategy.equity >= 100000 ? color.green : color.red)

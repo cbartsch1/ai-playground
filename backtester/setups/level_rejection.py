@@ -120,6 +120,16 @@ def update_level_state(bar: dict, session, cfg) -> None:
             if name not in session.lvl_first_test_bar:
                 session.lvl_first_test_bar[name] = session.lvl_bar_index
 
+        # Accumulate bar range/volume while in zone (for absorption proxy)
+        if in_zone_now:
+            bar_range = bar["high"] - bar["low"]
+            bar_vol = bar.get("volume", 0)
+            if name not in session.lvl_zone_ranges:
+                session.lvl_zone_ranges[name] = []
+                session.lvl_zone_volumes[name] = []
+            session.lvl_zone_ranges[name].append(bar_range)
+            session.lvl_zone_volumes[name].append(bar_vol)
+
         # Update zone presence for next bar's dedup
         session.lvl_in_zone[name] = in_zone_now
 
@@ -191,6 +201,42 @@ def _bar_quality(bar: dict) -> dict:
         "upper_wick_ratio": upper_wick_ratio,
         "clv": clv,
     }
+
+
+def _check_absorption(name: str, session, cfg) -> bool:
+    """Check if bars at this level show absorption pattern (institutional defense).
+
+    Absorption = 3+ bars at level with decreasing range and elevated volume.
+    This signals that a large player is absorbing sell orders, increasing
+    the probability that the level holds and price rejects.
+
+    Returns True if absorption detected (pass filter), False if not.
+    """
+    ranges = session.lvl_zone_ranges.get(name, [])
+    volumes = session.lvl_zone_volumes.get(name, [])
+
+    if len(ranges) < cfg.lvl_absorption_min_bars:
+        return False  # Not enough bars at level
+
+    # Check decreasing range: last N bars should show compression
+    recent = ranges[-cfg.lvl_absorption_min_bars:]
+    decreasing = True
+    for i in range(1, len(recent)):
+        if recent[i] >= recent[i - 1]:
+            decreasing = False
+            break
+
+    if not decreasing:
+        return False
+
+    # Check elevated volume: average volume at level vs session average
+    if cfg.lvl_absorption_vol_mult > 0 and session.rth_bars > 0:
+        avg_zone_vol = sum(volumes[-cfg.lvl_absorption_min_bars:]) / cfg.lvl_absorption_min_bars
+        session_avg_vol = session.rth_vol_sum / session.rth_bars
+        if session_avg_vol > 0 and avg_zone_vol < session_avg_vol * cfg.lvl_absorption_vol_mult:
+            return False
+
+    return True
 
 
 def check_signal(bar: dict, prev_bar: Optional[dict], session, cfg) -> Optional[dict]:
@@ -265,6 +311,10 @@ def check_signal(bar: dict, prev_bar: Optional[dict], session, cfg) -> Optional[
         if name == "IBH" and cfg.lvl_ibh_wide_only and not session.is_wide_ib:
             continue
 
+        # ONH: optionally skip when overnight high is "poor" (weak, likely to break)
+        if name == "ONH" and cfg.lvl_skip_poor_high and session.on_high_is_poor:
+            continue
+
         # ── Confluence scoring ──
         confluence = _confluence_score(name, price, resistance, cfg.lvl_confluence_zone)
         if confluence < cfg.lvl_min_confluence:
@@ -278,6 +328,11 @@ def check_signal(bar: dict, prev_bar: Optional[dict], session, cfg) -> Optional[
         if bq is not None and cfg.lvl_use_bar_metrics:
             # Require meaningful upper wick (rejection signature)
             if bq["upper_wick_ratio"] < cfg.lvl_min_wick_ratio:
+                continue
+
+        # ── Absorption proxy filter (optional) ──
+        if cfg.lvl_use_absorption:
+            if not _check_absorption(name, session, cfg):
                 continue
 
         # ── Stop: level + buffer, capped by pct stop ──
@@ -392,6 +447,10 @@ def check_signal_multi(bar: dict, prev_bar: Optional[dict], session, cfg,
         if name == "IBH" and cfg.lvl_ibh_wide_only and not session.is_wide_ib:
             continue
 
+        # ONH poor high filter (same as check_signal)
+        if name == "ONH" and cfg.lvl_skip_poor_high and session.on_high_is_poor:
+            continue
+
         confluence = _confluence_score(name, price, resistance, cfg.lvl_confluence_zone)
         if confluence < cfg.lvl_min_confluence:
             continue
@@ -401,6 +460,11 @@ def check_signal_multi(bar: dict, prev_bar: Optional[dict], session, cfg,
 
         if bq is not None and cfg.lvl_use_bar_metrics:
             if bq["upper_wick_ratio"] < cfg.lvl_min_wick_ratio:
+                continue
+
+        # Absorption proxy filter (same as check_signal)
+        if cfg.lvl_use_absorption:
+            if not _check_absorption(name, session, cfg):
                 continue
 
         # Stop calculation (same as check_signal)
@@ -414,6 +478,7 @@ def check_signal_multi(bar: dict, prev_bar: Optional[dict], session, cfg,
 
         # Find staggered targets
         signals = []
+
         for contract_idx in range(n_contracts):
             skip = uniform_skip if uniform_skip >= 0 else contract_idx
             target = _find_target(bar, session, skip=skip)

@@ -1,0 +1,465 @@
+// SPY Opening Range Breakout (ORB-15)
+// First 15 minutes establish the opening auction range
+// Breakout with volume confirmation signals directional conviction
+// For SPY 5m chart | All inputs optimizable
+//
+// CONCEPT:
+//   The first 15 minutes of trading (9:30-9:45 ET) capture overnight orders,
+//   market-on-open orders, and early institutional flow into a defined range.
+//   A breakout from this range with volume confirmation signals directional
+//   conviction for the remainder of the session. One of the most well-documented
+//   edges in equity markets.
+//
+// ENTRIES:
+//   1. Breakout LONG  — close > OR High + volume confirmation (one per day)
+//   2. Breakout SHORT — close < OR Low  + volume confirmation (one per day)
+//   3. Retest LONG    — pullback to OR High after initial breakout (optional)
+//   4. Retest SHORT   — rally to OR Low after initial breakdown (optional)
+//
+// FILTERS: Gap size, OR width, volume, cutoff time, Friday, cooldown
+// STOPS:  OR Midpoint (default) or Opposite Side, capped at maxStopPct
+// TARGETS: Range extension (1.0x, 1.5x, 2.0x OR range beyond breakout level)
+//@version=6
+strategy(title="SPY ORB-15", shorttitle="ORB-15", overlay=true, pyramiding=0,
+     initial_capital=100000, currency=currency.USD,
+     default_qty_type=strategy.percent_of_equity, default_qty_value=10,
+     commission_type=strategy.commission.cash_per_order, commission_value=1.00,
+     slippage=1)
+
+// ==============================================================================
+// INPUTS — Opening Range
+// ==============================================================================
+
+orBars    = input.int(3,     "OR Bars (3=15min on 5m)",  minval=1,    maxval=12,  step=1,    group="Opening Range")
+minORPct  = input.float(0.1, "Min OR Range %",           minval=0.05, maxval=0.5, step=0.05, group="Opening Range")
+maxORPct  = input.float(1.5, "Max OR Range %",           minval=0.5,  maxval=3.0, step=0.1,  group="Opening Range")
+
+// ==============================================================================
+// INPUTS — Entry
+// ==============================================================================
+
+volumeMult     = input.float(1.3,  "Volume Multiplier",     minval=1.0, maxval=3.0, step=0.1, group="Entry")
+useRetestEntry = input.bool(true,  "Enable Retest Entries",                                    group="Entry")
+maxGapPct      = input.float(1.0,  "Max Gap %",             minval=0.3, maxval=2.0, step=0.1, group="Entry")
+cutoffHour     = input.int(11,     "Cutoff Hour (ET)",       minval=10,  maxval=14,  step=1,   group="Entry")
+cutoffMin      = input.int(30,     "Cutoff Minute (ET)",     minval=0,   maxval=55,  step=5,   group="Entry")
+useNoonBlackout = input.bool(false, "Noon Blackout 12-13 ET",                                  group="Entry")
+useADXFilter   = input.bool(false, "ADX Filter (skip <15)",                                    group="Entry")
+adxLen         = input.int(14,     "ADX Length",             minval=7,   maxval=21,  step=1,   group="Entry")
+adxThreshold   = input.float(15.0, "ADX Threshold",         minval=10.0, maxval=25.0, step=1.0, group="Entry")
+
+// ==============================================================================
+// INPUTS — Risk
+// ==============================================================================
+
+stopType     = input.string("OR Midpoint", "Stop Type", options=["OR Midpoint", "Opposite Side"], group="Risk")
+maxStopPct   = input.float(1.0, "Max Stop %",           minval=0.3, maxval=2.0, step=0.1, group="Risk")
+targetMult   = input.float(1.0, "Target Multiplier",    minval=0.5, maxval=3.0, step=0.5, group="Risk")
+minTargetPct = input.float(0.1, "Min Target Distance %", minval=0.05, maxval=0.5, step=0.05, group="Risk")
+cooldownBars = input.int(2,     "Cooldown Bars",         minval=1,   maxval=10,  step=1,   group="Risk")
+positionPct  = input.float(10,  "Position Size %",       minval=5,   maxval=25,  step=5,   group="Risk")
+
+// ==============================================================================
+// INPUTS — Session
+// ==============================================================================
+
+skipFriday  = input.bool(true, "Skip Fridays",                               group="Session")
+flattenHour = input.int(15,    "Flatten Hour (ET)", minval=15, maxval=15, step=1, group="Session")
+flattenMin  = input.int(55,    "Flatten Minute (ET)", minval=50, maxval=59, step=1, group="Session")
+
+// ==============================================================================
+// SESSION & TIME (Eastern Time)
+// ==============================================================================
+
+etHour   = hour(time, "America/New_York")
+etMinute = minute(time, "America/New_York")
+etTime   = etHour * 100 + etMinute
+
+rthStart = 930
+rthEnd   = 1600
+
+isRTH  = etTime >= rthStart and etTime < rthEnd
+newRTH = isRTH and not isRTH[1]
+
+// Friday detection
+isFriday     = dayofweek(time, "America/New_York") == dayofweek.friday
+inNoonBlack  = useNoonBlackout and etTime >= 1200 and etTime < 1300
+cutoffTime   = cutoffHour * 100 + cutoffMin
+flattenTime  = flattenHour * 100 + flattenMin
+beforeCutoff = etTime < cutoffTime
+entryAllowed = not (skipFriday and isFriday) and not inNoonBlack
+
+// ==============================================================================
+// PREVIOUS DAY CLOSE (for gap calculation)
+// ==============================================================================
+
+var float lastRTHClose = na
+var float prevDayClose = na
+
+if newRTH
+    prevDayClose := lastRTHClose
+
+if isRTH
+    lastRTHClose := close
+
+// ==============================================================================
+// OPENING RANGE DETECTION
+// ==============================================================================
+
+var float orHigh     = na
+var float orLow      = na
+var bool  orDone     = false
+var int   rthBarCount = 0
+
+// Gap tracking
+var float todayGap    = 0.0
+var float todayGapPct = 0.0
+
+if newRTH
+    orHigh     := high
+    orLow      := low
+    orDone     := false
+    rthBarCount := 1
+    // Calculate gap
+    todayGap    := na(prevDayClose) ? 0.0 : open - prevDayClose
+    todayGapPct := na(prevDayClose) or prevDayClose == 0 ? 0.0 : math.abs(open - prevDayClose) / prevDayClose * 100
+else if isRTH
+    rthBarCount += 1
+
+// Build OR during first N bars
+if isRTH and not orDone
+    if rthBarCount <= orBars
+        orHigh := math.max(nz(orHigh, high), high)
+        orLow  := math.min(nz(orLow, low), low)
+    if rthBarCount > orBars
+        orDone := true
+
+// OR derived values
+orRange    = nz(orHigh - orLow, 0)
+orMid      = nz((orHigh + orLow) / 2, 0)
+orRangePct = orMid > 0 ? orRange / orMid * 100 : 0.0
+
+// OR validity flags
+orTooNarrow = orDone and orRangePct < minORPct
+orTooWide   = orDone and orRangePct > maxORPct
+orValid     = orDone and not orTooNarrow and not orTooWide
+
+// ==============================================================================
+// GAP FILTER
+// ==============================================================================
+
+gapFiltered = todayGapPct > maxGapPct
+
+// ==============================================================================
+// VOLUME CONFIRMATION
+// ==============================================================================
+
+volAvg  = ta.sma(volume, 20)
+volRatio = volAvg > 0 ? volume / volAvg : 0.0
+volOK    = volRatio > volumeMult
+
+// ==============================================================================
+// ADX FILTER (optional)
+// ==============================================================================
+
+[diPlus, diMinus, adxVal] = ta.dmi(adxLen, adxLen)
+adxOK = not useADXFilter or adxVal >= adxThreshold
+
+// ==============================================================================
+// COOLDOWN
+// ==============================================================================
+
+var int barsSinceExit = 100
+if strategy.position_size == 0 and strategy.position_size[1] != 0
+    barsSinceExit := 0
+else if strategy.position_size == 0
+    barsSinceExit += 1
+pastCooldown = barsSinceExit >= cooldownBars
+
+// ==============================================================================
+// DAILY TRIGGER TRACKING (one breakout + one retest per direction per day)
+// ==============================================================================
+
+var bool longTriggered    = false
+var bool shortTriggered   = false
+var bool longRetestUsed   = false
+var bool shortRetestUsed  = false
+var int  dayTradeCount    = 0
+
+if newRTH
+    longTriggered   := false
+    shortTriggered  := false
+    longRetestUsed  := false
+    shortRetestUsed := false
+    dayTradeCount   := 0
+
+// ==============================================================================
+// STOP & TARGET CALCULATION
+// ==============================================================================
+
+// Stop level
+longStop  = stopType == "OR Midpoint" ? orMid : orLow
+shortStop = stopType == "OR Midpoint" ? orMid : orHigh
+
+// Stop distance as percentage
+longStopPct  = orHigh > 0 ? (orHigh - longStop) / orHigh * 100 : 0.0
+shortStopPct = orLow > 0 ? (shortStop - orLow) / orLow * 100 : 0.0
+
+// Cap check: skip trade if stop exceeds max
+longStopOK  = longStopPct > 0 and longStopPct <= maxStopPct
+shortStopOK = shortStopPct > 0 and shortStopPct <= maxStopPct
+
+// Target levels (range extension)
+longTarget  = orHigh + orRange * targetMult
+shortTarget = orLow  - orRange * targetMult
+
+// Target distance checks (minimum distance)
+longTargetDist  = orHigh > 0 ? (longTarget - orHigh) / orHigh * 100 : 0.0
+shortTargetDist = orLow > 0 ? (orLow - shortTarget) / orLow * 100 : 0.0
+longTargetOK    = longTargetDist >= minTargetPct
+shortTargetOK   = shortTargetDist >= minTargetPct
+
+// ==============================================================================
+// ENTRY SIGNALS — BREAKOUT
+// ==============================================================================
+
+isFlat = strategy.position_size == 0
+
+// Long breakout
+longBreakoutSignal = orValid and not gapFiltered and adxOK
+     and close > orHigh and volOK
+     and not longTriggered and beforeCutoff
+     and entryAllowed and isFlat and pastCooldown and isRTH
+
+// Short breakout
+shortBreakoutSignal = orValid and not gapFiltered and adxOK
+     and close < orLow and volOK
+     and not shortTriggered and beforeCutoff
+     and entryAllowed and isFlat and pastCooldown and isRTH
+
+// ==============================================================================
+// ENTRY SIGNALS — RETEST (optional)
+// ==============================================================================
+
+// Retest tolerance: 0.1% of price
+retestTol = close * 0.001
+
+// Long retest: price pulled back to OR High (within tolerance) and bounces above
+longRetestSignal = useRetestEntry and orValid and not gapFiltered and adxOK
+     and longTriggered and not longRetestUsed
+     and low <= orHigh + retestTol and close > orHigh
+     and beforeCutoff and entryAllowed and isFlat and pastCooldown and isRTH
+
+// Short retest: price rallied back to OR Low (within tolerance) and fails below
+shortRetestSignal = useRetestEntry and orValid and not gapFiltered and adxOK
+     and shortTriggered and not shortRetestUsed
+     and high >= orLow - retestTol and close < orLow
+     and beforeCutoff and entryAllowed and isFlat and pastCooldown and isRTH
+
+// ==============================================================================
+// EXECUTION
+// ==============================================================================
+
+// Long breakout entry
+if longBreakoutSignal and longStopOK and longTargetOK
+    strategy.entry("ORB_L", strategy.long, qty=math.floor(strategy.equity * positionPct / 100 / close))
+    strategy.exit("ORB_LX", "ORB_L", stop=longStop, limit=longTarget)
+    longTriggered := true
+    dayTradeCount += 1
+    alert("ORB LONG entry at " + str.tostring(close, "#.##"), alert.freq_once_per_bar)
+
+// Short breakout entry
+if shortBreakoutSignal and shortStopOK and shortTargetOK
+    strategy.entry("ORB_S", strategy.short, qty=math.floor(strategy.equity * positionPct / 100 / close))
+    strategy.exit("ORB_SX", "ORB_S", stop=shortStop, limit=shortTarget)
+    shortTriggered := true
+    dayTradeCount += 1
+    alert("ORB SHORT entry at " + str.tostring(close, "#.##"), alert.freq_once_per_bar)
+
+// Long retest entry
+if longRetestSignal and longStopOK and longTargetOK
+    strategy.entry("ORB_LR", strategy.long, qty=math.floor(strategy.equity * positionPct / 100 / close))
+    strategy.exit("ORB_LRX", "ORB_LR", stop=longStop, limit=longTarget)
+    longRetestUsed := true
+    dayTradeCount += 1
+    alert("ORB LONG retest at " + str.tostring(close, "#.##"), alert.freq_once_per_bar)
+
+// Short retest entry
+if shortRetestSignal and shortStopOK and shortTargetOK
+    strategy.entry("ORB_SR", strategy.short, qty=math.floor(strategy.equity * positionPct / 100 / close))
+    strategy.exit("ORB_SRX", "ORB_SR", stop=shortStop, limit=shortTarget)
+    shortRetestUsed := true
+    dayTradeCount += 1
+    alert("ORB SHORT retest at " + str.tostring(close, "#.##"), alert.freq_once_per_bar)
+
+// ==============================================================================
+// SESSION FLATTEN
+// ==============================================================================
+
+if etTime >= flattenTime and strategy.position_size != 0
+    strategy.close_all("Flatten EOD")
+    alert("ORB flatten at " + str.tostring(close, "#.##"), alert.freq_once_per_bar)
+
+// ==============================================================================
+// VISUALS — OR LEVELS
+// ==============================================================================
+
+// OR High / Low lines (stepline after OR is done, extend right through session)
+orHighPlot = orDone and isRTH ? orHigh : na
+orLowPlot  = orDone and isRTH ? orLow  : na
+orMidPlot  = orDone and isRTH ? orMid  : na
+
+pHigh = plot(orHighPlot, "OR High", color.new(color.green, 0), 2, plot.style_stepline)
+pLow  = plot(orLowPlot,  "OR Low",  color.new(color.red, 0),   2, plot.style_stepline)
+plot(orMidPlot, "OR Mid", color.new(color.gray, 40), 1, plot.style_stepline)
+
+// Fill between OR High and Low
+fill(pHigh, pLow, color=color.new(color.yellow, 90), title="OR Fill")
+
+// ==============================================================================
+// VISUALS — TARGET LEVELS (only when OR is valid and set)
+// ==============================================================================
+
+longTargetPlot  = orValid and isRTH and longTriggered  ? longTarget  : na
+shortTargetPlot = orValid and isRTH and shortTriggered ? shortTarget : na
+
+plot(longTargetPlot,  "Long Target",  color.new(color.lime, 30),   1, plot.style_stepline)
+plot(shortTargetPlot, "Short Target", color.new(color.orange, 30), 1, plot.style_stepline)
+
+// ==============================================================================
+// VISUALS — ENTRY MARKERS
+// ==============================================================================
+
+plotshape(longBreakoutSignal  and longStopOK  and longTargetOK,  "Long Breakout",  shape.diamond, location.belowbar, color.lime,   size=size.small)
+plotshape(shortBreakoutSignal and shortStopOK and shortTargetOK, "Short Breakout", shape.diamond, location.abovebar, color.red,    size=size.small)
+plotshape(longRetestSignal    and longStopOK  and longTargetOK,  "Long Retest",    shape.diamond, location.belowbar, color.aqua,   size=size.small)
+plotshape(shortRetestSignal   and shortStopOK and shortTargetOK, "Short Retest",   shape.diamond, location.abovebar, color.orange, size=size.small)
+
+// ==============================================================================
+// VISUALS — BACKGROUND SHADING
+// ==============================================================================
+
+// OR formation period (light blue)
+isORPeriod = isRTH and not orDone
+bgcolor(isORPeriod ? color.new(color.blue, 92) : na, title="OR Period")
+
+// Non-RTH shading
+bgcolor(not isRTH ? color.new(color.gray, 96) : na, title="Non-RTH")
+
+// ==============================================================================
+// SESSION STATUS
+// ==============================================================================
+
+sessionStatus = isORPeriod ? "OR PERIOD" : (isRTH and beforeCutoff and not inNoonBlack ? "ACTIVE" : (isRTH and not beforeCutoff and etTime < flattenTime ? "CUTOFF" : (isRTH and etTime >= flattenTime ? "CLOSING" : "CLOSED")))
+
+// ==============================================================================
+// BREAKOUT STATUS
+// ==============================================================================
+
+breakoutStatus = longTriggered and shortTriggered ? "BOTH TRIGGERED" : longTriggered ? "LONG TRIGGERED" : shortTriggered ? "SHORT TRIGGERED" : "NONE"
+
+// ==============================================================================
+// RETEST STATUS
+// ==============================================================================
+
+retestStatus = not useRetestEntry ? "OFF" : (longRetestUsed or shortRetestUsed ? "USED" : (longTriggered or shortTriggered ? "AVAILABLE" : "WAITING"))
+
+// ==============================================================================
+// FILTER STATUS
+// ==============================================================================
+
+filterText = ""
+if skipFriday and isFriday
+    filterText := "FRI-OFF"
+else if gapFiltered
+    filterText := "GAP-SKIP"
+else if useADXFilter and not adxOK
+    filterText := "ADX-LOW"
+else if inNoonBlack
+    filterText := "NOON-BLK"
+else
+    filterText := "CLEAR"
+
+// ==============================================================================
+// OR STATUS
+// ==============================================================================
+
+orStatusText  = orDone ? (orTooNarrow ? "TOO NARROW" : (orTooWide ? "TOO WIDE" : "SET")) : ("FORMING " + str.tostring(math.min(rthBarCount, orBars)) + "/" + str.tostring(orBars))
+orStatusColor = orDone ? (orValid ? color.green : color.yellow) : color.aqua
+
+// ==============================================================================
+// DASHBOARD (15 rows, top-right)
+// ==============================================================================
+
+var table t = table.new(position.top_right, 2, 15, color.new(color.black, 75))
+if barstate.islast
+    // Row 0: Header
+    table.cell(t, 0, 0, "ORB-15", text_color=color.black, bgcolor=color.orange, text_size=size.normal)
+    table.cell(t, 1, 0, "SPY 5m", text_color=color.black, bgcolor=color.orange, text_size=size.normal)
+
+    // Row 1: OR High
+    orHighBroken = not na(orHigh) and close > orHigh and orDone
+    table.cell(t, 0, 1, "OR High", text_color=color.white)
+    table.cell(t, 1, 1, not na(orHigh) ? str.tostring(orHigh, "#.##") : "---", text_color=orHighBroken ? color.lime : color.green)
+
+    // Row 2: OR Low
+    orLowBroken = not na(orLow) and close < orLow and orDone
+    table.cell(t, 0, 2, "OR Low", text_color=color.white)
+    table.cell(t, 1, 2, not na(orLow) ? str.tostring(orLow, "#.##") : "---", text_color=orLowBroken ? color.fuchsia : color.red)
+
+    // Row 3: OR Range
+    orRangeColor = orTooNarrow or orTooWide ? color.yellow : color.white
+    table.cell(t, 0, 3, "OR Range", text_color=color.white)
+    table.cell(t, 1, 3, str.tostring(orRange, "#.##") + " (" + str.tostring(orRangePct, "#.##") + "%)", text_color=orRangeColor)
+
+    // Row 4: OR Status
+    table.cell(t, 0, 4, "OR Status", text_color=color.white)
+    table.cell(t, 1, 4, orStatusText, text_color=orStatusColor)
+
+    // Row 5: Gap
+    gapColor = gapFiltered ? color.yellow : color.white
+    table.cell(t, 0, 5, "Gap", text_color=color.white)
+    table.cell(t, 1, 5, str.tostring(todayGapPct, "#.##") + "%", text_color=gapColor)
+
+    // Row 6: Volume Ratio
+    volColor = volOK ? color.lime : color.gray
+    table.cell(t, 0, 6, "Vol Ratio", text_color=color.white)
+    table.cell(t, 1, 6, str.tostring(volRatio, "#.#") + "x", text_color=volColor)
+
+    // Row 7: Breakout
+    brkColor = longTriggered or shortTriggered ? color.aqua : color.gray
+    table.cell(t, 0, 7, "Breakout", text_color=color.white)
+    table.cell(t, 1, 7, breakoutStatus, text_color=brkColor)
+
+    // Row 8: Retest
+    rstColor = retestStatus == "AVAILABLE" ? color.lime : retestStatus == "OFF" ? color.gray : retestStatus == "USED" ? color.aqua : color.white
+    table.cell(t, 0, 8, "Retest", text_color=color.white)
+    table.cell(t, 1, 8, retestStatus, text_color=rstColor)
+
+    // Row 9: Session
+    sessColor = sessionStatus == "ACTIVE" ? color.green : sessionStatus == "OR PERIOD" ? color.aqua : sessionStatus == "CUTOFF" ? color.orange : sessionStatus == "CLOSING" ? color.red : color.gray
+    table.cell(t, 0, 9, "Session", text_color=color.white)
+    table.cell(t, 1, 9, sessionStatus, text_color=sessColor)
+
+    // Row 10: Filters
+    filterColor = filterText == "CLEAR" ? color.green : color.red
+    table.cell(t, 0, 10, "Filters", text_color=color.white)
+    table.cell(t, 1, 10, filterText, text_color=filterColor)
+
+    // Row 11: Cooldown
+    table.cell(t, 0, 11, "Cooldown", text_color=color.white)
+    table.cell(t, 1, 11, str.tostring(barsSinceExit) + "/" + str.tostring(cooldownBars), text_color=pastCooldown ? color.green : color.red)
+
+    // Row 12: Position
+    posText  = strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT"
+    posColor = strategy.position_size > 0 ? color.green : strategy.position_size < 0 ? color.red : color.gray
+    table.cell(t, 0, 12, "Position", text_color=color.white)
+    table.cell(t, 1, 12, posText, text_color=posColor)
+
+    // Row 13: Day Trades
+    table.cell(t, 0, 13, "Day Trades", text_color=color.white)
+    table.cell(t, 1, 13, str.tostring(dayTradeCount), text_color=color.aqua)
+
+    // Row 14: Equity
+    table.cell(t, 0, 14, "Equity", text_color=color.white)
+    table.cell(t, 1, 14, "$" + str.tostring(strategy.equity, "#,###"), text_color=strategy.equity >= 100000 ? color.green : color.red)

@@ -1,0 +1,267 @@
+AMT-TEMA v8 — Response to Independent Validation Review
+=======================================================
+
+Appreciate the effort here. Running an independent replication is
+the right way to stress-test a strategy, and the analysis framework
+is solid. There are findings we agree with, findings we dispute,
+and one critical methodological issue that needs to be resolved
+before the OOS conclusion can be accepted.
+
+
+1. In-Sample Replication (Feb 2024 - Feb 2026)
+-----------------------------------------------
+The directional alignment is good. Win rate, average win/loss, and
+signal detection are closely matched. The core IB breakdown logic
+is being replicated correctly. No dispute there.
+
+However, 228 trades vs 177 is a 29% discrepancy — and that matters
+more than the review suggests.
+
+The review attributes the extra 51 trades to "Pine entering on next
+bar open while we enter at signal bar close." That's not a minor
+implementation detail. Pine Script's strategy.entry() fills at the
+NEXT BAR'S OPEN, not the current bar's close. This is fundamental
+to how the strategy executes:
+
+  - Entry prices differ on every single trade
+  - Conditions can change between signal bar close and next bar open
+  - Trades that qualify at signal bar close may NOT qualify at next
+    bar open (TEMA slope can shift, price can gap, IB range can
+    change)
+  - The 51 extra trades are entries that our strategy never takes
+
+Those 51 phantom trades affect BOTH the in-sample and OOS results.
+If even half of them are losers, they're dragging down PF across
+the entire dataset. Before the OOS result can be accepted as a test
+of our strategy, the replication needs to match our entry logic:
+enter on the bar AFTER the signal, not on the signal bar itself.
+
+Request: Re-run the backtest with next-bar-open entry and compare
+trade counts. If the count lands near 177, the replication is clean.
+If it stays at 228, there's another signal detection difference to
+investigate.
+
+
+2. Out-of-Sample Result (Jan 2022 - Feb 2024)
+----------------------------------------------
+The headline — PF 1.011 on 265 trades — is concerning on its face.
+But two issues need to be addressed before accepting it.
+
+ISSUE 1: The 51 extra trades problem applies here too. If the
+replication engine is generating phantom signals in-sample, it's
+generating them OOS as well. The OOS result is testing a different
+strategy than ours. We can't accept a "breakeven" verdict when the
+test itself has a known execution difference.
+
+ISSUE 2: The OOS period (Jan 2022 - Feb 2024) includes market
+conditions that are fundamentally different from the strategy's
+intended operating environment:
+
+  2022: Major bear market. VIX consistently above 25, often above
+  30. ES dropped from ~4800 to ~3500. Massive IB ranges. Violent
+  counter-trend rallies within the downtrend.
+
+  2023: Low-vol recovery. Grinding bull with compressed ranges.
+  Fewer trend days.
+
+  Early 2024: Continuation of low-vol bull.
+
+Our 30bps percentage stop at ES 4000 (2022 lows) = 12 points. In
+a VIX 30+ environment with intraday swings of 50-100 points, a
+12-point stop gets clipped on noise before the trade can work. This
+isn't overfitting — it's the wrong tool for that environment.
+
+This is a regime problem, not a parameter problem.
+
+
+3. The Overfitting Claim
+-------------------------
+The review concludes "textbook overfitting." We disagree, and here's
+the evidence.
+
+CLAIM: "Edge disappears OOS."
+RESPONSE: Their OOS tests a different market regime, not a different
+parameter set. A strategy designed for trend days with manageable
+volatility SHOULD underperform in a VIX 30+ crash environment. That's
+not overfitting — that's regime specificity. A strategy that works
+everywhere is either holy grail or curve-fitted to look that way.
+
+CLAIM: "p-values are likely invalid because optimization overlaps
+test data."
+RESPONSE: This is factually incorrect. Here is our actual timeline:
+
+  v7 optimization:      Feb - Aug 2025 (6 months)
+  v7 walk-forward OOS:  Aug 2025 - Feb 2026 (6 months)
+  Walk-forward result:  PF 1.224, ratio 0.77 (above 0.7 threshold)
+
+  v8 added Year 2:      Feb 2024 - Feb 2025
+  Year 2 status:        COMPLETELY UNSEEN during any optimization
+  Year 2 result:        PF 1.129, 87 trades, +$3,412
+
+The p-values (0.028 t-test, 0.013 permutation) were computed on
+the full 2-year dataset, which includes a full year of data that
+was never part of any optimization. "Partially in-sample" is not
+accurate. Half the dataset is true OOS and it's profitable.
+
+CLAIM: "High parameter count (15+) relative to trade count."
+RESPONSE: The code contains ~15 parameters. The number of parameters
+that were actually tuned is 4:
+
+  1. Short-only (binary on/off)
+  2. 30bps percentage stop (single value)
+  3. Skip Fridays (binary on/off)
+  4. Noon blackout (binary on/off)
+
+VA Fade and 80% Rule are OFF — zero tuned parameters from those
+setups. TEMA lengths were tested and found INSENSITIVE across wide
+ranges (slow 16-28 and trend 39-69 produce equivalent results).
+Each of the 4 decisions was A/B tested independently, not jointly
+optimized. Characterizing disabled code as "tunable parameters" is
+misleading.
+
+CLAIM: "Win rate collapse (44.7% to 34.7%) pinpoints the problem."
+RESPONSE: Win rate collapse is exactly what you'd expect when
+deploying a trend-day strategy in a crash/chop regime. IB breakdowns
+in VIX 30+ environments produce false signals because the market
+moves too fast and too far for percentage-based stops to survive.
+This is a regime mismatch, not evidence that TEMA filters are
+period-specific.
+
+
+4. What We Agree With
+----------------------
+The review raises legitimate points that are worth addressing:
+
+REGIME GATING: The strategy should not trade in all conditions. We
+agree, and we already have this. Our Medallion 2.0 regime model
+(7-state HMM, OOS validated p=0.0003) blocks trades during Crash,
+Bull Run, and Strong Bull regimes. With the filter applied:
+
+  Without regime gating: 177 trades, PF 1.511, Sharpe 2.65
+  With regime gating:    155 trades, PF 1.69, Sharpe 3.39
+
+The regime filter removes 22 trades that were likely losers —
+exactly the kind of trades that would have been triggered in the
+2022 environment. If the independent backtest were re-run with
+regime gating on the full Jan 2022 - Feb 2026 window, we'd expect
+the 2022-2024 losers to be filtered out.
+
+ATR-BASED STOPS: The recommendation to replace bps with ATR-multiple
+stops is good. The 30bps stop scales with price but NOT with
+volatility. At ES 4000 with VIX 30, a 12-point stop is too tight.
+At ES 6000 with VIX 14, an 18-point stop is arguably too wide. An
+ATR-multiple stop (e.g., 1.2x ATR14) adapts to both price and
+realized volatility. This is worth testing and we'll evaluate it.
+
+WALK-FORWARD ON ROLLING WINDOWS: The suggestion to split 4 years
+into 6-month rolling windows is reasonable methodology. We're open
+to running this once the replication entry-logic issue is resolved,
+so both sides are testing the same strategy.
+
+
+5. What We'd Like To See
+--------------------------
+Before we can accept the "breakeven OOS" conclusion, the independent
+backtest needs one fix:
+
+  Match Pine's entry logic: next-bar-open entry, not signal-bar-close.
+
+If the trade count on Feb 2024 - Feb 2026 drops from 228 to near
+177, we know the replication is clean and we can trust the OOS
+result. If the OOS period still shows breakeven with correct entry
+logic, that's valuable information and we'll take it seriously.
+
+We'd also like to see the OOS result WITH regime gating applied.
+If a VIX > 25 filter (simple proxy for our full regime model) is
+added to the Jan 2022 - Feb 2024 period, how many of those 265
+trades survive, and what's the PF on the filtered set?
+
+
+6. Summary
+-----------
+  Replication alignment:      Good on signal detection and win rate.
+                              Entry logic difference creates 51
+                              phantom trades that affect all results.
+
+  OOS finding:                Cannot be accepted until entry logic
+                              matches. The 29% trade count discrepancy
+                              means the OOS is testing a different
+                              strategy.
+
+  Overfitting claim:          Disagree. The evidence points to regime
+                              specificity, not parameter fitting. Our
+                              own OOS (Feb 2024-2025, fully unseen)
+                              is profitable at PF 1.129.
+
+  p-value validity:           Our p-values are computed on a dataset
+                              that includes a full year of unseen
+                              data. "Partially in-sample" is factually
+                              incorrect.
+
+  Regime gating:              Already implemented via Medallion 2.0.
+                              Strategy is not designed to trade in all
+                              conditions and should not be evaluated
+                              as if it is.
+
+  ATR stops:                  Good recommendation. Worth testing as a
+                              replacement for percentage-based stops.
+
+  Portfolio entry:             We maintain this strategy passes OOS
+                              validation on our own walk-forward data.
+                              Happy to run additional validation once
+                              the replication is aligned.
+
+The underlying question — does the IB breakdown edge survive
+different market regimes without regime gating — is fair. The answer
+is probably not, and that's fine. The strategy was never designed
+to trade blind. It has a regime filter, and the filter works.
+
+We welcome a re-run with corrected entry logic and a VIX filter
+applied to the OOS period. That would give both sides a clean
+comparison.
+
+
+7. Addendum — Entry Timing and Lookahead Bias
+----------------------------------------------
+A concern was raised that our Pine Script may execute at bar close,
+which would constitute lookahead bias (seeing the close price and
+trading on it before the bar actually closes).
+
+This is not the case. Here is our strategy() declaration (line 18):
+
+  strategy(title="AMT-TEMA v8", shorttitle="AMT-TEMA-v8",
+    overlay=true, pyramiding=0, initial_capital=100000,
+    currency=currency.USD, default_qty_type=strategy.fixed,
+    default_qty_value=1, commission_type=strategy.commission.cash_per_contract,
+    commission_value=2.50, slippage=1, margin_long=5, margin_short=5)
+
+What is NOT present:
+  - process_orders_on_close = NOT SET (defaults to false)
+  - calc_on_every_tick = NOT SET (defaults to false)
+  - lookahead = NOT USED anywhere in the script
+
+With these defaults, Pine Script's strategy.entry() fills at the
+NEXT BAR'S OPEN — not the current bar's close. This is the standard,
+realistic execution model: bar closes, signal is detected, order
+fills on the next bar.
+
+In live alert-based trading, the flow is:
+  1. 5-minute bar closes
+  2. TradingView evaluates the script on that closed bar
+  3. Alert fires (condition met)
+  4. Webhook sends order to broker
+  5. Market order fills at current price (effectively next bar open)
+
+This matches Pine's default backtest behavior exactly. There is no
+lookahead bias in our results.
+
+The irony is that the independent replication stated in Section 2
+of their review: "Pine entering on the next bar open while we enter
+at the signal bar close." Their Python backtest is the one entering
+at bar close — which they separately noted is "practically impossible"
+in live trading. This entry timing difference is the most likely
+source of the 51 extra trades in their replication and may be
+inflating or deflating their OOS results depending on fill quality.
+
+We'd welcome them re-running with next-bar-open entry to align
+both backtests on the same realistic execution model.

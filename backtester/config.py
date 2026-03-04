@@ -111,6 +111,14 @@ class StrategyConfig:
     lvl_use_bar_metrics: bool = False  # require bar quality filter for entry
     lvl_min_wick_ratio: float = 0.3    # min upper wick as % of bar range (0.3 = 30%)
 
+    # Absorption proxy filter: detect institutional defense at level
+    lvl_use_absorption: bool = False   # require absorption signal for entry
+    lvl_absorption_min_bars: int = 3   # min bars at level to detect absorption
+    lvl_absorption_vol_mult: float = 1.0  # zone volume must exceed session avg * this
+
+    # Poor high filter: skip ONH rejection when overnight high is "poor" (weak)
+    lvl_skip_poor_high: bool = False   # skip ONH rejection when on_high_is_poor=True
+
     # --- Setup 6B: Level Rejection LONG (support bounce) ---
     use_level_reject_long: bool = False
     lvl_long_trigger: str = "any"       # "any" | "bullish_close" | "wick" | "failed_break"
@@ -141,6 +149,9 @@ class StrategyConfig:
     # --- TEMA Exit (v9) ---
     use_tema_exit: bool = False           # Default OFF (enable with --v9)
 
+    # --- VWAP Filter ---
+    use_vwap_filter: bool = False       # Only short above VWAP (institutional flow alignment)
+
     # --- Time Filters ---
     blackout_start: int = 0             # Skip entries during this window (HHMM), 0=disabled
     blackout_end: int = 0               # End of blackout window (HHMM), 0=disabled
@@ -152,6 +163,76 @@ class StrategyConfig:
     # --- Percentage-Based Stops ---
     pct_stop_mode: bool = False         # If True, ib_max_stop_pts scales as % of price
     pct_stop_bps: float = 30.0          # Basis points for max stop (30 bps ≈ 20pt at ES 6700)
+
+    # --- Strategy 7: Value Area Rotation (VAR) ---
+    use_var: bool = False
+    var_zone_pts: float = 3.0       # proximity to dev_vah/dev_val to trigger
+    var_target_pts: float = 0.0     # 0 = target dev_poc (dynamic), >0 = fixed pts
+    var_stop_buffer: float = 4.0    # stop beyond VA edge
+    var_min_ib_periods: int = 4     # wait for N 30-min periods (~2 hours) before trading
+    var_require_rotation: bool = True  # require NO active OTF streak (rotation day)
+    var_max_otf: int = 2            # max OTF streak to still consider "rotation"
+    max_var_trades: int = 8         # max VAR trades per day
+    var_min_rr: float = 0.8        # min reward:risk ratio
+
+    # --- Strategy 8: Post-Trend Day Fade (PTF) ---
+    use_ptf: bool = False
+    ptf_target: str = "prev_poc"    # "prev_poc" | "single_print_mid" | "composite_poc"
+    ptf_stop_buffer: float = 5.0    # stop beyond the single print extreme
+    ptf_min_otf: int = 4            # min OTF streak to classify as "trend day"
+    ptf_entry_zone: str = "single_prints"  # "single_prints" | "prev_vah"
+    ptf_require_reversal: bool = True  # require OTF in opposite direction before entry
+    max_ptf_trades: int = 2         # max PTF trades per day
+    ptf_min_target_pts: float = 8.0 # min distance to target (skip tiny targets)
+
+    # --- Strategy 9: Market Structure (MS) — Dalton's setups + SMA 8/24 ---
+    use_ms: bool = False
+    ms_zone_pts: float = 3.0        # proximity zone around each structural level
+    ms_stop_buffer: float = 5.0     # stop beyond the structural level
+    ms_min_target_pts: float = 4.0  # min distance to target (4-5 pts = profitable per ES math)
+    ms_min_rr: float = 0.5          # min reward:risk ratio
+    ms_max_risk: float = 15.0       # max stop distance (caps risk per trade)
+    ms_ma_type: str = "sma"         # "sma" | "tema" — which MA pair for timing
+    ms_ma_confirm_bars: int = 0     # require MA state for N bars (entry lag / algo shakeout)
+    max_ms_trades: int = 8          # max trades per day
+    ms_use_vp_levels: bool = True   # use real VP-derived prev levels (vs VWAP proxy)
+    ms_use_prev_va: bool = True     # trade at prev day VAH/VAL
+    ms_use_on_levels: bool = True   # trade at overnight high/low
+    ms_use_ib_levels: bool = True   # trade at IB high/low
+    ms_use_dev_va: bool = True      # trade at developing VAH/VAL
+    ms_use_poc: bool = True         # trade at prev/dev POC as pivot
+    ms_level_directions: dict = field(default_factory=dict)  # per-level direction filter e.g. {"MS_ONH": "short", "MS_pPOC": "long"}
+    ms_skip_long_poc_overhead: bool = False  # Skip longs when prev POC is between entry and target (resistance)
+    ms_use_fib_targets: bool = False         # Use Fibonacci retracement targets from prev day range
+
+
+
+    # --- Setup 11: Overnight Sweep / Gap Fade (OS) ---
+    use_os: bool = False
+    os_min_gap: float = 2.0             # min gap size in points to trigger
+    os_max_gap: float = 40.0            # max gap (too large = news event, don't fade)
+    os_stop_mode: str = "opening_print"  # "opening_print" | "on_extreme" | "fixed"
+    os_stop_buffer: float = 2.0         # buffer above opening print or ON extreme
+    os_fixed_stop: float = 10.0         # fixed stop pts (if stop_mode="fixed")
+    os_max_risk: float = 20.0           # max stop distance in points
+    os_target_mode: str = "cascade"     # "cascade" | "prev_close" | "prev_vah" | "prev_poc"
+    os_min_target_pts: float = 4.0      # min distance to target
+    os_min_rr: float = 0.5              # min reward:risk ratio
+    os_require_on_sweep: bool = True    # require ON to have traded above/below prev close
+    os_entry_window: int = 6            # max bars from RTH open to enter (first 30 min)
+    os_require_ma: bool = False         # require SMA 8 < SMA 24 for shorts
+    os_ma_type: str = "sma"             # "sma" | "tema"
+    max_os_trades: int = 2              # max trades per day
+
+    # --- Setup 10: Failed Auction (FA) ---
+    use_fa: bool = False
+    fa_max_break_bars: int = 6      # max bars above/below IB before it's "sustained" (not failed)
+    fa_stop_buffer: float = 3.0     # stop beyond the failed extreme
+    fa_min_rr: float = 0.5          # min reward:risk
+    fa_max_risk: float = 20.0       # max stop distance
+    fa_require_ma: bool = False     # require SMA confirmation
+    fa_ma_type: str = "sma"         # "sma" | "tema"
+    max_fa_trades: int = 2          # max per day
 
     # --- Engine ---
     pessimistic_fills: bool = True      # When both stop and target could hit, stop wins

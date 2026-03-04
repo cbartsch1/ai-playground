@@ -1,0 +1,27 @@
+//@version=6
+indicator("Volume vs 20 Avg", format=format.volume)
+
+avgLen = input.int(20, "Average Length", minval=1, maxval=200, step=1)
+
+avgVol = ta.sma(volume, avgLen)
+isAbove = volume > avgVol
+pctDiff = (volume - avgVol) / avgVol * 100
+
+// Actual volume — white when above average, gray when below
+plot(volume, "Volume", color=isAbove ? color.white : color.gray, style=plot.style_histogram, linewidth=4)
+
+// Average volume line
+plot(avgVol, "Avg Volume", color=color.yellow, style=plot.style_line, linewidth=2)
+
+// Percentage vs average — shows in data window on hover
+plot(pctDiff, "% vs Avg", color=color.new(color.aqua, 100), display=display.data_window + display.status_line)
+
+// Floating HUD on last bar
+var label hud = na
+if barstate.islast
+    if not na(hud)
+        label.delete(hud)
+    hud := label.new(bar_index, volume,
+         "vs Avg: " + (pctDiff >= 0 ? "+" : "") + str.tostring(pctDiff, "#.#") + "%",
+         color=color.new(color.black, 100), textcolor=isAbove ? color.white : color.gray,
+         style=label.style_label_left, size=size.normal)

@@ -1,0 +1,14 @@
+MS+OS Best Official Backtest
+Date: 2026-03-01 06:21
+Data: ES 5-min, 2024-02-15 to 2026-02-23
+
+Trades: 437
+Win Rate: 43.0%
+Profit Factor: 1.411
+Net P&L: $+30,402.50
+Max Drawdown: $5,967.50
+Sharpe: 2.17
+t-test p: 0.004414
+Permutation p: 0.001400
+Bootstrap P(profit): 99.9%
+WF ratio: 0.98 (PASS)

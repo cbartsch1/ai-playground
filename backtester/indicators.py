@@ -101,4 +101,7 @@ def compute_indicators(df: pd.DataFrame,
     df["ema_bearish_8_21"] = df["ema_8"] < df["ema_21"]
     df["sma_8"] = sma(df["close"], 8)
     df["sma_21"] = sma(df["close"], 21)
+    df["sma_24"] = sma(df["close"], 24)
     df["sma_bearish_8_21"] = df["sma_8"] < df["sma_21"]
+    df["sma_bearish_8_24"] = df["sma_8"] < df["sma_24"]
+    df["sma_bullish_8_24"] = df["sma_8"] > df["sma_24"]

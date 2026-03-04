@@ -1,1 +1,1 @@
-"""Setup signal generators — IB Breakout, IB Rejection, Level Rejection, VA Fade, 80% Rule, TEMA Cross."""
+"""Setup signal generators — IB Breakout, IB Rejection, Level Rejection, VA Fade, 80% Rule, TEMA Cross, VA Rotation, Post-Trend Fade, Market Structure, Failed Auction."""

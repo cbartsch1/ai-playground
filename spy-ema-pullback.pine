@@ -1,0 +1,500 @@
+// SPY EMA Pullback in Trend
+// Momentum Continuation — Buy the Dip / Sell the Rally
+// For SPY 5m chart | All inputs optimizable
+//
+// CONCEPT:
+//   In established intraday trends, price retraces to the EMA zone
+//   (between fast and slow EMAs) then bounces. This offers low-risk
+//   entries with the trend. Works well on SPY due to strong intraday
+//   momentum from trend-following capital.
+//
+// ENTRY:
+//   LONG:  EMA stack bullish (9>21>50), price pulls back to EMA21 zone,
+//          bullish candle bounce, close still above EMA50
+//   SHORT: EMA stack bearish (9<21<50), price rallies to EMA21 zone,
+//          bearish candle rejection, close still below EMA50
+//
+// EXIT:
+//   Fixed R:R target (default 2.0), stop below/above EMA50 + buffer
+//   Optional ATR trailing stop after 1R move
+//   Flatten at 15:55 ET
+//
+//@version=6
+strategy(title      = "SPY EMA Pullback",
+     shorttitle     = "EMA-PB",
+     overlay        = true,
+     pyramiding     = 0,
+     initial_capital = 100000,
+     currency       = currency.USD,
+     default_qty_type = strategy.percent_of_equity,
+     default_qty_value = 10,
+     commission_type  = strategy.commission.cash_per_order,
+     commission_value = 1.00,
+     slippage       = 1)
+
+// ==============================================================================
+// INPUTS — EMAs
+// ==============================================================================
+
+emaFastLen = input.int(9,  "EMA Fast",   minval=5,  maxval=20, step=1, group="EMAs")
+emaMedLen  = input.int(21, "EMA Medium", minval=15, maxval=35, step=1, group="EMAs")
+emaSlowLen = input.int(50, "EMA Slow",   minval=30, maxval=80, step=5, group="EMAs")
+
+// ==============================================================================
+// INPUTS — Trend
+// ==============================================================================
+
+useADX       = input.bool(true, "Use ADX Filter",    group="Trend")
+adxLen       = input.int(14,    "ADX Length",         minval=7,  maxval=21, step=1, group="Trend")
+adxThreshold = input.int(20,    "ADX Threshold",      minval=15, maxval=35, step=5, group="Trend")
+
+// ==============================================================================
+// INPUTS — Entry
+// ==============================================================================
+
+pullbackZonePct    = input.float(0.05, "Pullback Zone (%)",     minval=0.01, maxval=0.15, step=0.01, group="Entry", tooltip="How close price must get to EMA21 to count as pullback, as % of price")
+requireBounceCandle = input.bool(true, "Require Bounce Candle", group="Entry", tooltip="Long: close > open (bullish). Short: close < open (bearish)")
+useRSIFilter       = input.bool(true, "Use RSI Filter",        group="Entry")
+rsiLen             = input.int(14,     "RSI Length",            minval=7, maxval=21, step=1, group="Entry")
+minPullbackScore   = input.int(1,      "Min Pullback Score",   minval=0, maxval=3,  step=1, group="Entry", tooltip="0-3 quality score. Higher = stricter")
+maxTradesPerDay    = input.int(4,      "Max Trades/Day",       minval=1, maxval=8,  step=1, group="Entry")
+
+// ==============================================================================
+// INPUTS — Risk
+// ==============================================================================
+
+stopBufferPct  = input.float(0.15, "Stop Buffer (%)",       minval=0.05, maxval=0.5,  step=0.05, group="Risk", tooltip="Buffer beyond EMA50 for stop loss")
+maxStopPct     = input.float(0.6,  "Max Stop (%)",          minval=0.3,  maxval=1.5,  step=0.1,  group="Risk", tooltip="Skip trade if stop distance exceeds this")
+targetRR       = input.float(2.0,  "Target R:R",            minval=1.0,  maxval=4.0,  step=0.5,  group="Risk")
+minTargetPct   = input.float(0.2,  "Min Target (%)",        minval=0.05, maxval=0.5,  step=0.05, group="Risk")
+useTrailingStop = input.bool(true, "Use Trailing Stop",     group="Risk")
+trailATRMult   = input.float(1.5,  "Trail ATR Multiplier",  minval=1.0,  maxval=3.0,  step=0.5,  group="Risk")
+cooldownBars   = input.int(3,      "Cooldown Bars",         minval=1,    maxval=10,   step=1,    group="Risk")
+positionPct    = input.float(10,   "Position Size (%)",     minval=5,    maxval=25,   step=5,    group="Risk")
+
+// ==============================================================================
+// INPUTS — Session
+// ==============================================================================
+
+entryStartHour = input.int(10, "Entry Start Hour (ET)",  minval=9,  maxval=12, step=1, group="Session")
+entryStartMin  = input.int(0,  "Entry Start Min (ET)",   minval=0,  maxval=55, step=5, group="Session")
+entryEndHour   = input.int(15, "Entry End Hour (ET)",     minval=13, maxval=15, step=1, group="Session")
+entryEndMin    = input.int(0,  "Entry End Min (ET)",      minval=0,  maxval=55, step=5, group="Session")
+flattenHour    = input.int(15, "Flatten Hour (ET)",       minval=15, maxval=15, step=1, group="Session")
+flattenMin     = input.int(55, "Flatten Min (ET)",        minval=50, maxval=59, step=1, group="Session")
+skipFriday     = input.bool(true, "Skip Fridays",         group="Session")
+noonBlackout   = input.bool(true, "Noon Blackout (12-13)", group="Session", tooltip="Skip trades during lunch hour — pullbacks here are often traps")
+
+// ==============================================================================
+// EMA CALCULATIONS
+// ==============================================================================
+
+emaFast = ta.ema(close, emaFastLen)
+emaMed  = ta.ema(close, emaMedLen)
+emaSlow = ta.ema(close, emaSlowLen)
+
+// ==============================================================================
+// ADX / DI CALCULATIONS
+// ==============================================================================
+
+// ADX calculation using ta.dmi()
+[diPlus, diMinus, adxVal] = ta.dmi(adxLen, adxLen)
+
+adxOK      = not useADX or adxVal > adxThreshold
+adxBullish = not useADX or (adxVal > adxThreshold and diPlus > diMinus)
+adxBearish = not useADX or (adxVal > adxThreshold and diMinus > diPlus)
+
+// ==============================================================================
+// RSI
+// ==============================================================================
+
+rsiVal = ta.rsi(close, rsiLen)
+
+// ==============================================================================
+// ATR (for trailing stop)
+// ==============================================================================
+
+atrVal = ta.atr(14)
+
+// ==============================================================================
+// VOLUME
+// ==============================================================================
+
+volSMA    = ta.sma(volume, 20)
+volOK     = volume > 0.7 * volSMA
+
+// ==============================================================================
+// SESSION & TIME (Eastern Time)
+// ==============================================================================
+
+etHour   = hour(time, "America/New_York")
+etMinute = minute(time, "America/New_York")
+etTime   = etHour * 100 + etMinute
+
+rthStart = 930
+rthEnd   = 1600
+
+isRTH  = etTime >= rthStart and etTime < rthEnd
+newRTH = isRTH and not isRTH[1]
+
+// Entry time window
+entryStartTime = entryStartHour * 100 + entryStartMin
+entryEndTime   = entryEndHour * 100 + entryEndMin
+flattenTime    = flattenHour * 100 + flattenMin
+
+isEntryWindow = etTime >= entryStartTime and etTime < entryEndTime
+
+// Friday detection
+isFriday = dayofweek(time, "America/New_York") == dayofweek.friday
+
+// Noon blackout (12:00-13:00 ET)
+inNoonBlackout = noonBlackout and etTime >= 1200 and etTime < 1300
+
+// Combined entry filter
+entryAllowed = isRTH and isEntryWindow and not (skipFriday and isFriday) and not inNoonBlackout
+
+// Session label for dashboard
+sessionLabel = not isRTH ? "CLOSED" : etTime < 1000 ? "OPENING" : etTime >= 1200 and etTime < 1300 ? "LUNCH" : etTime >= 1500 ? "CLOSING" : "ACTIVE"
+
+// ==============================================================================
+// TREND STATE
+// ==============================================================================
+
+bullishStack = emaFast > emaMed and emaMed > emaSlow
+bearishStack = emaFast < emaMed and emaMed < emaSlow
+
+strongUptrend    = bullishStack and close > emaFast
+pullbackUptrend  = bullishStack and close <= emaMed
+strongDowntrend  = bearishStack and close < emaFast
+pullbackDowntrend = bearishStack and close >= emaMed
+
+// Trend label for dashboard
+trendLabel = strongUptrend ? "STRONG UP" : pullbackUptrend ? "PULLBACK UP" : strongDowntrend ? "STRONG DOWN" : pullbackDowntrend ? "PULLBACK DOWN" : "NO TREND"
+
+// Price vs EMAs label
+priceVsEMA = close > emaFast and close > emaMed and close > emaSlow ? "ABOVE ALL" : close < emaFast and close < emaMed and close < emaSlow ? "BELOW ALL" : "IN ZONE"
+
+// ==============================================================================
+// PULLBACK DETECTION
+// ==============================================================================
+
+pullbackZone = close * pullbackZonePct / 100.0
+
+// LONG pullback: price touches or enters the EMA zone from above
+longPullback  = bullishStack and low <= emaMed + pullbackZone and close > emaSlow
+// SHORT pullback: price rallies up into the EMA zone from below
+shortPullback = bearishStack and high >= emaMed - pullbackZone and close < emaSlow
+
+// Bounce candle
+longBounce  = not requireBounceCandle or close > open
+shortBounce = not requireBounceCandle or close < open
+
+// RSI filter
+longRSIOK  = not useRSIFilter or (rsiVal >= 40 and rsiVal <= 55)
+shortRSIOK = not useRSIFilter or (rsiVal >= 45 and rsiVal <= 60)
+
+// ==============================================================================
+// PULLBACK QUALITY SCORING (0-3)
+// ==============================================================================
+
+// +1 if volume decreasing during pullback (healthy — sellers/buyers not aggressive)
+volDecreasing = volume < volume[1] and volume[1] < volume[2]
+
+// +1 if pullback is 3+ bars (orderly, not V-shaped)
+// For longs: count bars where close was declining toward EMA zone
+// For shorts: count bars where close was rising toward EMA zone
+var int pullbackBars_L = 0
+pullbackBars_L := close < close[1] ? pullbackBars_L[1] + 1 : 0
+var int pullbackBars_S = 0
+pullbackBars_S := close > close[1] ? pullbackBars_S[1] + 1 : 0
+orderlyPullback_L = pullbackBars_L >= 3
+orderlyPullback_S = pullbackBars_S >= 3
+
+// +1 if RSI in sweet spot
+rsiSweetSpot_L = rsiVal >= 40 and rsiVal <= 55
+rsiSweetSpot_S = rsiVal >= 45 and rsiVal <= 60
+
+// Scores
+longScore  = (volDecreasing ? 1 : 0) + (orderlyPullback_L ? 1 : 0) + (rsiSweetSpot_L ? 1 : 0)
+shortScore = (volDecreasing ? 1 : 0) + (orderlyPullback_S ? 1 : 0) + (rsiSweetSpot_S ? 1 : 0)
+
+longScoreOK  = longScore >= minPullbackScore
+shortScoreOK = shortScore >= minPullbackScore
+
+// ==============================================================================
+// TRADE COUNTERS & COOLDOWN (reset daily)
+// ==============================================================================
+
+var int dayTrades = 0
+if newRTH
+    dayTrades := 0
+
+tradesOK = dayTrades < maxTradesPerDay
+
+// Cooldown tracking
+var int barsSinceExit = 100
+if strategy.position_size == 0 and strategy.position_size[1] != 0
+    barsSinceExit := 0
+else if strategy.position_size == 0
+    barsSinceExit += 1
+pastCooldown = barsSinceExit >= cooldownBars
+
+// ==============================================================================
+// STOP / TARGET CALCULATIONS
+// ==============================================================================
+
+// LONG: stop below EMA50 - buffer
+longStopBuffer  = close * stopBufferPct / 100.0
+longStopPrice   = emaSlow - longStopBuffer
+longRisk        = close - longStopPrice
+longRiskPct     = longRisk / close * 100.0
+longMaxStopOK   = longRiskPct <= maxStopPct and longRisk > 0
+
+longTarget      = close + targetRR * longRisk
+longTargetPct   = (longTarget - close) / close * 100.0
+longMinTargetOK = longTargetPct >= minTargetPct
+
+// SHORT: stop above EMA50 + buffer
+shortStopBuffer = close * stopBufferPct / 100.0
+shortStopPrice  = emaSlow + shortStopBuffer
+shortRisk       = shortStopPrice - close
+shortRiskPct    = shortRisk / close * 100.0
+shortMaxStopOK  = shortRiskPct <= maxStopPct and shortRisk > 0
+
+shortTarget      = close - targetRR * shortRisk
+shortTargetPct   = (close - shortTarget) / close * 100.0
+shortMinTargetOK = shortTargetPct >= minTargetPct
+
+// ==============================================================================
+// SIGNAL LOGIC
+// ==============================================================================
+
+// Common gates
+isFlat = strategy.position_size == 0
+commonGates = entryAllowed and isFlat and pastCooldown and tradesOK and volOK
+
+// LONG signal
+longSignal = commonGates and longPullback and longBounce and longRSIOK and adxBullish and longMaxStopOK and longMinTargetOK and longScoreOK
+
+// SHORT signal
+shortSignal = commonGates and shortPullback and shortBounce and shortRSIOK and adxBearish and shortMaxStopOK and shortMinTargetOK and shortScoreOK
+
+// ==============================================================================
+// TRAILING STOP STATE
+// ==============================================================================
+
+var float trailStopLevel = na
+var float entryPrice     = na
+var float posRisk        = na
+var float posStop        = na   // stop level locked at entry
+var float posTarget      = na   // target level locked at entry
+var int   posDirection   = 0    // 1 = long, -1 = short, 0 = flat
+
+// Track entry — lock stop and target at entry time so they don't drift with EMAs
+if longSignal
+    entryPrice     := close
+    posRisk        := longRisk
+    posStop        := longStopPrice
+    posTarget      := longTarget
+    posDirection   := 1
+    trailStopLevel := na
+
+if shortSignal
+    entryPrice     := close
+    posRisk        := shortRisk
+    posStop        := shortStopPrice
+    posTarget      := shortTarget
+    posDirection   := -1
+    trailStopLevel := na
+
+// Update trailing stop while in position
+if useTrailingStop and strategy.position_size != 0 and not na(entryPrice) and not na(posRisk)
+    if posDirection == 1
+        // Long trailing: after 1R move, start trailing at close - ATR * mult
+        pnl = close - entryPrice
+        if pnl >= posRisk
+            atrTrail = close - trailATRMult * atrVal
+            // Trail can only move up, never down
+            if na(trailStopLevel)
+                trailStopLevel := math.max(entryPrice, atrTrail)  // at least break even
+            else
+                trailStopLevel := math.max(nz(trailStopLevel), atrTrail)
+    else if posDirection == -1
+        // Short trailing: after 1R move, start trailing at close + ATR * mult
+        pnl = entryPrice - close
+        if pnl >= posRisk
+            atrTrail = close + trailATRMult * atrVal
+            // Trail can only move down (tighter), never up
+            if na(trailStopLevel)
+                trailStopLevel := math.min(entryPrice, atrTrail)  // at least break even
+            else
+                trailStopLevel := math.min(nz(trailStopLevel), atrTrail)
+
+// Reset on flat
+if strategy.position_size == 0
+    trailStopLevel := na
+    if strategy.position_size[1] != 0
+        posDirection := 0
+        entryPrice   := na
+        posRisk      := na
+        posStop      := na
+        posTarget    := na
+
+// ==============================================================================
+// EXECUTION
+// ==============================================================================
+
+if longSignal
+    strategy.entry("PB_L", strategy.long, qty=math.floor(strategy.equity * positionPct / 100.0 / close))
+    dayTrades += 1
+    alert("EMA_PB LONG pullback entry at " + str.tostring(close, "#.##"), alert.freq_once_per_bar_close)
+
+if shortSignal
+    strategy.entry("PB_S", strategy.short, qty=math.floor(strategy.equity * positionPct / 100.0 / close))
+    dayTrades += 1
+    alert("EMA_PB SHORT pullback entry at " + str.tostring(close, "#.##"), alert.freq_once_per_bar_close)
+
+// Exit management — update exits every bar to handle trailing stop
+// Uses locked stop/target from entry time; trailing stop overrides initial stop
+if strategy.position_size > 0
+    exitStop = useTrailingStop and not na(trailStopLevel) ? trailStopLevel : posStop
+    strategy.exit("PB_LX", "PB_L", stop=exitStop, limit=posTarget)
+
+if strategy.position_size < 0
+    exitStop = useTrailingStop and not na(trailStopLevel) ? trailStopLevel : posStop
+    strategy.exit("PB_SX", "PB_S", stop=exitStop, limit=posTarget)
+
+// Session flatten at 15:55 ET
+if etTime >= flattenTime and strategy.position_size != 0
+    strategy.close_all("RTH Flatten")
+    alert("EMA_PB FLATTEN at " + str.tostring(close, "#.##"), alert.freq_once_per_bar_close)
+
+// ==============================================================================
+// VISUALS — EMA Lines
+// ==============================================================================
+
+pFast = plot(emaFast, "EMA 9",  color.new(color.lime,   0), 1)
+pMed  = plot(emaMed,  "EMA 21", color.new(color.orange,  0), 2)
+pSlow = plot(emaSlow, "EMA 50", color.new(color.red,     0), 2)
+
+// Fill between EMA 9 and EMA 21 (green = bullish stack, red = bearish)
+fillColor_9_21 = bullishStack ? color.new(color.green, 85) : bearishStack ? color.new(color.red, 85) : color.new(color.gray, 95)
+fill(pFast, pMed, fillColor_9_21, title="EMA 9-21 Fill")
+
+// Fill between EMA 21 and EMA 50 (lighter shade)
+fillColor_21_50 = bullishStack ? color.new(color.green, 90) : bearishStack ? color.new(color.red, 90) : color.new(color.gray, 95)
+fill(pMed, pSlow, fillColor_21_50, title="EMA 21-50 Fill")
+
+// ==============================================================================
+// VISUALS — Entry Markers
+// ==============================================================================
+
+plotshape(longSignal,  "Long Entry",  shape.triangleup,   location.belowbar, color.lime,  size=size.small, text="PB")
+plotshape(shortSignal, "Short Entry", shape.triangledown,  location.abovebar, color.red,   size=size.small, text="PB")
+
+// ==============================================================================
+// VISUALS — Trailing Stop Level
+// ==============================================================================
+
+trailPlot = strategy.position_size != 0 and not na(trailStopLevel) ? trailStopLevel : na
+plot(trailPlot, "Trail Stop", color.new(color.gray, 30), 1, plot.style_linebr, display=display.pane)
+
+// ==============================================================================
+// VISUALS — Background
+// ==============================================================================
+
+bgcolor(not isRTH ? color.new(color.gray, 95) : inNoonBlackout ? color.new(color.orange, 95) : na, title="Session BG")
+
+// ==============================================================================
+// DASHBOARD (16 rows, top-right)
+// ==============================================================================
+
+var table t = table.new(position.top_right, 2, 16, color.new(color.black, 75))
+
+if barstate.islast
+    // Row 0: Header
+    table.cell(t, 0, 0, "EMA Pullback", text_color=color.black, bgcolor=color.lime)
+    table.cell(t, 1, 0, "SPY 5m",       text_color=color.black, bgcolor=color.lime)
+
+    // Row 1: EMA values
+    table.cell(t, 0, 1, "EMA 9/21/50", text_color=color.white)
+    table.cell(t, 1, 1, str.tostring(emaFast, "#.##") + " / " + str.tostring(emaMed, "#.##") + " / " + str.tostring(emaSlow, "#.##"), text_color=color.white)
+
+    // Row 2: Trend state
+    table.cell(t, 0, 2, "Trend", text_color=color.white)
+    trendColor = strongUptrend or pullbackUptrend ? color.green : strongDowntrend or pullbackDowntrend ? color.red : color.gray
+    table.cell(t, 1, 2, trendLabel, text_color=trendColor)
+
+    // Row 3: ADX
+    table.cell(t, 0, 3, "ADX(" + str.tostring(adxLen) + ")", text_color=color.white)
+    adxColor = adxVal > adxThreshold ? color.green : color.red
+    table.cell(t, 1, 3, str.tostring(adxVal, "#.#") + (useADX ? "" : " (OFF)"), text_color=useADX ? adxColor : color.gray)
+
+    // Row 4: DI+ / DI-
+    table.cell(t, 0, 4, "DI+ / DI-", text_color=color.white)
+    diColor = diPlus > diMinus ? color.green : color.red
+    table.cell(t, 1, 4, str.tostring(diPlus, "#.#") + " / " + str.tostring(diMinus, "#.#"), text_color=diColor)
+
+    // Row 5: RSI
+    table.cell(t, 0, 5, "RSI(" + str.tostring(rsiLen) + ")", text_color=color.white)
+    rsiColor = rsiVal >= 55 ? color.red : rsiVal <= 45 ? color.green : color.yellow
+    table.cell(t, 1, 5, str.tostring(rsiVal, "#.#") + (useRSIFilter ? "" : " (OFF)"), text_color=rsiColor)
+
+    // Row 6: Pullback Quality
+    table.cell(t, 0, 6, "PB Quality", text_color=color.white)
+    displayScore = strategy.position_size > 0 or longPullback ? longScore : strategy.position_size < 0 or shortPullback ? shortScore : 0
+    scoreColor = displayScore >= 2 ? color.green : displayScore >= 1 ? color.yellow : color.red
+    table.cell(t, 1, 6, str.tostring(displayScore) + "/3 (min " + str.tostring(minPullbackScore) + ")", text_color=scoreColor)
+
+    // Row 7: Price vs EMAs
+    table.cell(t, 0, 7, "Price vs EMAs", text_color=color.white)
+    pveColor = priceVsEMA == "ABOVE ALL" ? color.green : priceVsEMA == "BELOW ALL" ? color.red : color.yellow
+    table.cell(t, 1, 7, priceVsEMA, text_color=pveColor)
+
+    // Row 8: Session
+    table.cell(t, 0, 8, "Session", text_color=color.white)
+    sessColor = sessionLabel == "ACTIVE" ? color.green : sessionLabel == "OPENING" ? color.yellow : sessionLabel == "LUNCH" ? color.orange : sessionLabel == "CLOSING" ? color.orange : color.gray
+    table.cell(t, 1, 8, sessionLabel, text_color=sessColor)
+
+    // Row 9: Filters
+    table.cell(t, 0, 9, "Filters", text_color=color.white)
+    filterText = ""
+    if skipFriday and isFriday
+        filterText += "FRI-OFF "
+    if inNoonBlackout
+        filterText += "NOON-OFF "
+    if useADX and adxVal <= adxThreshold
+        filterText += "ADX-LOW "
+    if filterText == ""
+        filterText := "CLEAR"
+    filterColor = filterText == "CLEAR" ? color.green : color.red
+    table.cell(t, 1, 9, filterText, text_color=filterColor)
+
+    // Row 10: Cooldown
+    table.cell(t, 0, 10, "Cooldown", text_color=color.white)
+    table.cell(t, 1, 10, str.tostring(barsSinceExit) + "/" + str.tostring(cooldownBars), text_color=pastCooldown ? color.green : color.red)
+
+    // Row 11: Day Trades
+    table.cell(t, 0, 11, "Day Trades", text_color=color.white)
+    dtColor = dayTrades >= maxTradesPerDay ? color.red : dayTrades > 0 ? color.yellow : color.green
+    table.cell(t, 1, 11, str.tostring(dayTrades) + "/" + str.tostring(maxTradesPerDay), text_color=dtColor)
+
+    // Row 12: Position
+    table.cell(t, 0, 12, "Position", text_color=color.white)
+    posText  = strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT"
+    posColor = strategy.position_size > 0 ? color.green : strategy.position_size < 0 ? color.red : color.gray
+    table.cell(t, 1, 12, posText, text_color=posColor)
+
+    // Row 13: Trail Stop
+    table.cell(t, 0, 13, "Trail Stop", text_color=color.white)
+    trailText = not na(trailStopLevel) and strategy.position_size != 0 ? str.tostring(trailStopLevel, "#.##") : "N/A"
+    trailColor = not na(trailStopLevel) and strategy.position_size != 0 ? color.yellow : color.gray
+    table.cell(t, 1, 13, trailText + (useTrailingStop ? "" : " (OFF)"), text_color=trailColor)
+
+    // Row 14: Volume
+    table.cell(t, 0, 14, "Volume", text_color=color.white)
+    table.cell(t, 1, 14, str.tostring(volume, "#,###") + " / " + str.tostring(volSMA, "#,###"), text_color=volOK ? color.green : color.red)
+
+    // Row 15: Equity
+    table.cell(t, 0, 15, "Equity", text_color=color.white)
+    table.cell(t, 1, 15, "$" + str.tostring(strategy.equity, "#,###"), text_color=strategy.equity >= 100000 ? color.green : color.red)

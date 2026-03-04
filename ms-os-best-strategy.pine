@@ -1,0 +1,710 @@
+// MS+OS Best Strategy
+// Market Structure + Overnight Sweep Combined
+// For ES 5m chart | All inputs optimizable
+//
+// SETUPS:
+//   1. Overnight Sweep (OS) — Gap-up fade at first RTH bar (short-only edge)
+//      - Gap-down longs included for completeness (near-zero value)
+//   2. Market Structure (MS) — Structural level fades after IB
+//      - ONH SHORT: fade overnight high with bearish SMA
+//      - ONL LONG: fade overnight low with bullish SMA
+//      - pVAH SHORT: fade previous day VAH with bearish SMA
+//
+// Performance (2yr, Feb 2024 - Feb 2026):
+//   437 trades, PF 1.411, +$30,403, p=0.004, Sharpe 2.17
+//   Walk-forward: PASS (PF ratio 0.98), Y2 p=0.037
+//
+// Per-setup: OS_GAP_UP 76t PF 2.04, MS_ONH 115t PF 1.64,
+//            MS_ONL 103t PF 1.20, MS_pVAH 101t PF 1.20, OS_GAP_DN 42t PF 1.03
+//@version=6
+strategy(title="MS+OS Best", shorttitle="MS-OS", overlay=true, pyramiding=0, initial_capital=100000, currency=currency.USD, default_qty_type=strategy.fixed, default_qty_value=1, commission_type=strategy.commission.cash_per_contract, commission_value=2.50, slippage=1, margin_long=5, margin_short=5)
+
+// ==============================================================================
+// SMA ENGINE (validated with SMA, not TEMA)
+// ==============================================================================
+
+smaFastLen = input.int(8,  "SMA Fast",  minval=3,  maxval=21, step=1, group="SMA")
+smaSlowLen = input.int(24, "SMA Slow",  minval=13, maxval=55, step=1, group="SMA")
+
+smaFast = ta.sma(close, smaFastLen)
+smaSlow = ta.sma(close, smaSlowLen)
+
+smaBearish = smaFast < smaSlow
+smaBullish = smaFast > smaSlow
+
+// ==============================================================================
+// SESSION & TIME (Eastern Time)
+// ==============================================================================
+
+etHour   = hour(time, "America/New_York")
+etMinute = minute(time, "America/New_York")
+etTime   = etHour * 100 + etMinute
+
+rthStart = 930
+rthEnd   = 1600
+ibEndTime = 1030
+
+msTradeStart = input.int(1035, "MS Trade Start (ET)", minval=1030, maxval=1100, step=5, group="Session")
+tradeEnd     = input.int(1500, "Trade End (ET)",   minval=1430, maxval=1555, step=5, group="Session")
+flattenTime  = input.int(1555, "Flatten Time (ET)", minval=1530, maxval=1600, step=5, group="Session")
+
+// --- Time Filters ---
+skipFriday = input.bool(true, "Skip Fridays", group="Session")
+
+// --- Automation (PickMyTrade -> Tradovate) ---
+pmtToken   = input.string("k170b15680ae5ebcff062d", "PickMyTrade Token", group="Automation", tooltip="From PickMyTrade dashboard")
+pmtAccount = input.string("DEMO2361007", "Tradovate Account ID", group="Automation")
+
+isRTH           = etTime >= rthStart and etTime < rthEnd
+isIBPeriod      = etTime >= rthStart and etTime < ibEndTime
+msTradingWindow = etTime >= msTradeStart and etTime < tradeEnd
+newRTH          = isRTH and not isRTH[1]
+
+// Friday detection (Pine dayofweek: 1=Sun, 6=Fri, 7=Sat)
+isFriday    = dayofweek(time, "America/New_York") == dayofweek.friday
+entryAllowed = not (skipFriday and isFriday)
+
+// ==============================================================================
+// OVERNIGHT SESSION (Globex) -- 6:00 PM -> 9:30 AM ET
+// Tracks overnight high/low, freezes at RTH open
+// ==============================================================================
+
+isGlobex  = etTime >= 1800 or etTime < rthStart
+newGlobex = isGlobex and not isGlobex[1]
+
+var float onHigh   = na
+var float onLow    = na
+var bool  onFrozen = false
+
+if newGlobex
+    onHigh   := high
+    onLow    := low
+    onFrozen := false
+
+if isGlobex and not onFrozen
+    onHigh := math.max(nz(onHigh, high), high)
+    onLow  := math.min(nz(onLow, low), low)
+
+if newRTH
+    onFrozen := true
+
+// ==============================================================================
+// PREVIOUS DAY LEVELS + RTH TRACKING
+// ==============================================================================
+
+var float prevDayHigh = na
+var float prevDayLow  = na
+
+// RTH close tracking for gap calculation
+var float lastRTHClose = na
+var float prevDayClose = na
+
+// Opening print tracking (OS)
+var float openingPrintHigh = na
+var float openingPrintLow  = na
+
+// RTH bar counter (reset each session)
+var int rthBarCount = 0
+
+// ON sweep flags (OS-specific)
+var bool onSweptAbove = false
+var bool onSweptBelow = false
+
+// Gap size
+var float gapSize = 0.0
+
+// (prevDayHigh/Low stored in newRTH block after Value Area section below)
+
+// ==============================================================================
+// INITIAL BALANCE -- First 60 min of RTH (9:30-10:30 ET)
+// ==============================================================================
+
+var float ibHigh = na
+var float ibLow  = na
+var bool  ibDone = false
+
+if newRTH
+    ibHigh := high
+    ibLow  := low
+    ibDone := false
+else if isIBPeriod
+    ibHigh := math.max(nz(ibHigh, high), high)
+    ibLow  := math.min(nz(ibLow, low), low)
+else if not ibDone and isRTH and not isIBPeriod
+    ibDone := true
+
+ibRange = nz(ibHigh - ibLow, 0)
+
+// ==============================================================================
+// PREVIOUS DAY VALUE AREA -- VWAP-BASED
+// Tracks RTH session VWAP and price stdev, stores at session change
+// ==============================================================================
+
+vaStdevMult = input.float(1.0, "VA Width (stdev mult)", minval=0.5, maxval=2.0, step=0.25, group="Value Area")
+
+// Running VWAP components for RTH session
+var float rthVwapSum = 0.0
+var float rthVolSum  = 0.0
+var float rthSqDev   = 0.0
+var int   rthBars    = 0
+
+// Previous session stored levels
+var float prevPOC = na
+var float prevVAH = na
+var float prevVAL = na
+var float prevSessionStdev = na
+
+// Track RTH session high/low
+var float rthHi = na
+var float rthLo = na
+
+if newRTH
+    // Store previous RTH session's VWAP as POC
+    if rthVolSum > 0
+        sessionVWAP = rthVwapSum / rthVolSum
+        sessionStdev = rthBars > 1 ? math.sqrt(rthSqDev / rthBars) : 0.0
+        prevPOC := sessionVWAP
+        prevSessionStdev := sessionStdev
+        // VA = VWAP +/- stdev (captures ~68% of price activity centered on volume)
+        prevVAH := sessionVWAP + sessionStdev * vaStdevMult
+        prevVAL := sessionVWAP - sessionStdev * vaStdevMult
+    // Store previous day high/low before reset
+    if not na(rthHi)
+        prevDayHigh := rthHi
+        prevDayLow  := rthLo
+    // Store previous day close for gap calculation
+    prevDayClose := lastRTHClose
+    // Compute gap
+    gapSize := na(prevDayClose) ? 0.0 : open - prevDayClose
+    // Opening print = first RTH bar
+    openingPrintHigh := high
+    openingPrintLow  := low
+    // Reset RTH bar counter
+    rthBarCount := 1
+    // ON sweep flags (after onFrozen := true above)
+    onSweptAbove := not na(onHigh) and not na(prevDayClose) and onHigh > prevDayClose
+    onSweptBelow := not na(onLow) and not na(prevDayClose) and onLow < prevDayClose
+    // Reset for new session
+    rthVwapSum := 0.0
+    rthVolSum  := 0.0
+    rthSqDev   := 0.0
+    rthBars    := 0
+    rthHi      := high
+    rthLo      := low
+else if isRTH
+    rthBarCount += 1
+
+if isRTH
+    rthVwapSum += hlc3 * volume
+    rthVolSum  += volume
+    rthHi      := math.max(nz(rthHi, high), high)
+    rthLo      := math.min(nz(rthLo, low), low)
+    // Update last RTH close every bar
+    lastRTHClose := close
+    // Running stdev: accumulate squared deviation from running VWAP
+    if rthVolSum > 0
+        currentVWAP = rthVwapSum / rthVolSum
+        rthSqDev += math.pow(close - currentVWAP, 2)
+        rthBars  += 1
+
+// Fallback if no previous data
+prevPOCVal = nz(prevPOC, close)
+prevVAHVal = nz(prevVAH, close + 10)
+prevVALVal = nz(prevVAL, close - 10)
+
+// ==============================================================================
+// VWAP (current RTH session — RTH-only, matches Python backtester)
+// ==============================================================================
+
+vwapVal = rthVolSum > 0 ? rthVwapSum / rthVolSum : ta.vwap(hlc3)
+
+// Developing VA from current session (for MS target finding)
+currentStdev = rthBars > 1 and rthVolSum > 0 ? math.sqrt(rthSqDev / rthBars) : 0.0
+currentVAH = vwapVal + currentStdev
+currentVAL = vwapVal - currentStdev
+
+// ==============================================================================
+// COOLDOWN
+// ==============================================================================
+
+cooldownBars = input.int(2, "Cooldown Bars", minval=1, maxval=15, step=1, group="Risk")
+
+var int barsSinceExit = 100
+if strategy.position_size == 0 and strategy.position_size[1] != 0
+    barsSinceExit := 0
+else if strategy.position_size == 0
+    barsSinceExit += 1
+pastCooldown = barsSinceExit >= cooldownBars
+
+// ==============================================================================
+// TARGET-FINDING FUNCTIONS
+// ==============================================================================
+
+// MS target below (for shorts): find nearest structural support
+msTargetBelow(price) =>
+    best = float(na)
+    // prevPOCVal
+    if not na(prevPOCVal) and prevPOCVal < price - 2
+        if na(best) or prevPOCVal > best
+            best := prevPOCVal
+    // prevVALVal
+    if not na(prevVALVal) and prevVALVal < price - 2
+        if na(best) or prevVALVal > best
+            best := prevVALVal
+    // vwapVal (developing POC proxy)
+    if not na(vwapVal) and vwapVal < price - 2
+        if na(best) or vwapVal > best
+            best := vwapVal
+    // currentVAL (developing VAL)
+    if currentStdev > 0 and not na(currentVAL) and currentVAL < price - 2
+        if na(best) or currentVAL > best
+            best := currentVAL
+    // onLow
+    if not na(onLow) and onLow < price - 2
+        if na(best) or onLow > best
+            best := onLow
+    // ibLow
+    if ibDone and not na(ibLow) and ibLow < price - 2
+        if na(best) or ibLow > best
+            best := ibLow
+    best
+
+// MS target above (for longs): find nearest structural resistance
+msTargetAbove(price) =>
+    best = float(na)
+    // prevPOCVal
+    if not na(prevPOCVal) and prevPOCVal > price + 2
+        if na(best) or prevPOCVal < best
+            best := prevPOCVal
+    // prevVAHVal
+    if not na(prevVAHVal) and prevVAHVal > price + 2
+        if na(best) or prevVAHVal < best
+            best := prevVAHVal
+    // vwapVal (developing POC proxy)
+    if not na(vwapVal) and vwapVal > price + 2
+        if na(best) or vwapVal < best
+            best := vwapVal
+    // currentVAH (developing VAH)
+    if currentStdev > 0 and not na(currentVAH) and currentVAH > price + 2
+        if na(best) or currentVAH < best
+            best := currentVAH
+    // onHigh
+    if not na(onHigh) and onHigh > price + 2
+        if na(best) or onHigh < best
+            best := onHigh
+    // ibHigh
+    if ibDone and not na(ibHigh) and ibHigh > price + 2
+        if na(best) or ibHigh < best
+            best := ibHigh
+    best
+
+// ==============================================================================
+// OS CASCADE TARGET FUNCTIONS
+// ==============================================================================
+
+// OS target below (for gap-up shorts): cascade through prev day levels
+osTargetBelow(price, minDist) =>
+    // Collect candidates below price
+    // Priority order: prevDayClose, prevVAH, prevPOC, prevVAL
+    // Pick HIGHEST (nearest below) that meets minimum distance
+    best = float(na)
+    fallback = float(na)
+    // Track all candidates
+    c1 = not na(prevDayClose) and prevDayClose < price ? prevDayClose : float(na)
+    c2 = not na(prevVAHVal) and prevVAHVal < price ? prevVAHVal : float(na)
+    c3 = not na(prevPOCVal) and prevPOCVal < price ? prevPOCVal : float(na)
+    c4 = not na(prevVALVal) and prevVALVal < price ? prevVALVal : float(na)
+    // Find nearest that meets min distance
+    if not na(c1)
+        if na(fallback) or c1 < fallback
+            fallback := c1
+        if price - c1 >= minDist and (na(best) or c1 > best)
+            best := c1
+    if not na(c2)
+        if na(fallback) or c2 < fallback
+            fallback := c2
+        if price - c2 >= minDist and (na(best) or c2 > best)
+            best := c2
+    if not na(c3)
+        if na(fallback) or c3 < fallback
+            fallback := c3
+        if price - c3 >= minDist and (na(best) or c3 > best)
+            best := c3
+    if not na(c4)
+        if na(fallback) or c4 < fallback
+            fallback := c4
+        if price - c4 >= minDist and (na(best) or c4 > best)
+            best := c4
+    // If no candidate meets min distance, use farthest (lowest)
+    na(best) ? fallback : best
+
+// OS target above (for gap-down longs): cascade through prev day levels
+osTargetAbove(price, minDist) =>
+    // Candidates above price
+    // Priority: prevDayClose, prevVAL, prevPOC, prevVAH
+    // Pick LOWEST (nearest above) that meets minimum distance
+    best = float(na)
+    fallback = float(na)
+    c1 = not na(prevDayClose) and prevDayClose > price ? prevDayClose : float(na)
+    c2 = not na(prevVALVal) and prevVALVal > price ? prevVALVal : float(na)
+    c3 = not na(prevPOCVal) and prevPOCVal > price ? prevPOCVal : float(na)
+    c4 = not na(prevVAHVal) and prevVAHVal > price ? prevVAHVal : float(na)
+    // Find nearest that meets min distance
+    if not na(c1)
+        if na(fallback) or c1 > fallback
+            fallback := c1
+        if c1 - price >= minDist and (na(best) or c1 < best)
+            best := c1
+    if not na(c2)
+        if na(fallback) or c2 > fallback
+            fallback := c2
+        if c2 - price >= minDist and (na(best) or c2 < best)
+            best := c2
+    if not na(c3)
+        if na(fallback) or c3 > fallback
+            fallback := c3
+        if c3 - price >= minDist and (na(best) or c3 < best)
+            best := c3
+    if not na(c4)
+        if na(fallback) or c4 > fallback
+            fallback := c4
+        if c4 - price >= minDist and (na(best) or c4 < best)
+            best := c4
+    na(best) ? fallback : best
+
+// ==============================================================================
+// OVERNIGHT SWEEP (OS) INPUTS
+// ==============================================================================
+
+useOS          = input.bool(true, "Enable Overnight Sweep", group="Overnight Sweep")
+osMinGap       = input.float(3.0, "Min Gap Size (pts)", minval=1.0, maxval=10.0, step=0.5, group="Overnight Sweep")
+osMaxGap       = input.float(20.0, "Max Gap Size (pts)", minval=5.0, maxval=40.0, step=1.0, group="Overnight Sweep")
+osStopBuffer   = input.float(5.0, "Stop Buffer (pts)", minval=1.0, maxval=15.0, step=1.0, group="Overnight Sweep")
+osMaxRisk      = input.float(25.0, "Max Risk (pts)", minval=5.0, maxval=40.0, step=1.0, group="Overnight Sweep")
+osMinTargetPts = input.float(3.0, "Min Target Distance (pts)", minval=1.0, maxval=10.0, step=0.5, group="Overnight Sweep")
+osMinRR        = input.float(0.5, "Min R:R Ratio", minval=0.1, maxval=2.0, step=0.1, group="Overnight Sweep")
+maxOSTrades    = input.int(1, "Max OS Trades/Day", minval=1, maxval=3, step=1, group="Overnight Sweep")
+osEntryWindow  = input.int(1, "Entry Window (bars)", minval=1, maxval=5, step=1, group="Overnight Sweep", tooltip="Only trade in first N bars of RTH. 1 = first bar only.")
+
+// ==============================================================================
+// MARKET STRUCTURE (MS) INPUTS
+// ==============================================================================
+
+useMS          = input.bool(true, "Enable Market Structure", group="Market Structure")
+msZonePts      = input.float(3.0, "Zone Width (pts)", minval=1.0, maxval=10.0, step=0.5, group="Market Structure")
+msStopBuffer   = input.float(4.0, "Stop Buffer (pts)", minval=1.0, maxval=10.0, step=0.5, group="Market Structure")
+msMinTargetPts = input.float(8.0, "Min Target Distance (pts)", minval=3.0, maxval=20.0, step=1.0, group="Market Structure")
+msMinRR        = input.float(0.3, "Min R:R Ratio", minval=0.1, maxval=2.0, step=0.1, group="Market Structure")
+msMaxRisk      = input.float(25.0, "Max Risk (pts)", minval=5.0, maxval=40.0, step=1.0, group="Market Structure")
+maxMSTrades    = input.int(8, "Max MS Trades/Day", minval=1, maxval=12, step=1, group="Market Structure")
+
+// ==============================================================================
+// TRADE COUNTERS (reset daily)
+// ==============================================================================
+
+var int osTradesS = 0
+var int osTradesL = 0
+var int msTrades  = 0
+
+// Per-level tracking (each level trades once per day)
+var bool ms_traded_ONH  = false
+var bool ms_traded_ONL  = false
+var bool ms_traded_pVAH = false
+
+if newRTH
+    osTradesS     := 0
+    osTradesL     := 0
+    msTrades      := 0
+    ms_traded_ONH := false
+    ms_traded_ONL := false
+    ms_traded_pVAH := false
+
+// ==============================================================================
+// OS SIGNAL LOGIC
+// ==============================================================================
+
+// --- Gap-Up SHORT (main edge — 76 trades, PF 2.04) ---
+osGapUpValid = gapSize >= osMinGap and gapSize <= osMaxGap
+osShortGates = useOS and isRTH and rthBarCount <= osEntryWindow and entryAllowed and pastCooldown and strategy.position_size == 0 and osTradesS < maxOSTrades
+
+osShortStop = na(onHigh) ? openingPrintHigh + osStopBuffer : math.max(onHigh, openingPrintHigh) + osStopBuffer
+osShortTarget = osTargetBelow(close, osMinTargetPts)
+
+osShortRisk     = not na(osShortStop) ? osShortStop - close : 0.0
+osShortDistance = not na(osShortTarget) ? close - osShortTarget : 0.0
+osShortRiskOK   = osShortRisk > 0 and osShortRisk <= osMaxRisk and osShortDistance >= osMinTargetPts and (osShortDistance / osShortRisk) >= osMinRR
+
+osShortSignal = osShortGates and osGapUpValid and onSweptAbove and not na(osShortTarget) and osShortRiskOK
+
+// --- Gap-Down LONG (42 trades, PF 1.03 — included for completeness) ---
+osGapDnValid = gapSize <= -osMinGap and gapSize >= -osMaxGap
+osLongGates  = useOS and isRTH and rthBarCount <= osEntryWindow and entryAllowed and pastCooldown and strategy.position_size == 0 and osTradesL < maxOSTrades
+
+osLongStop = na(onLow) ? openingPrintLow - osStopBuffer : math.min(onLow, openingPrintLow) - osStopBuffer
+osLongTarget = osTargetAbove(close, osMinTargetPts)
+
+osLongRisk     = not na(osLongStop) ? close - osLongStop : 0.0
+osLongDistance = not na(osLongTarget) ? osLongTarget - close : 0.0
+osLongRiskOK   = osLongRisk > 0 and osLongRisk <= osMaxRisk and osLongDistance >= osMinTargetPts and (osLongDistance / osLongRisk) >= osMinRR
+
+osLongSignal = osLongGates and osGapDnValid and onSweptBelow and not na(osLongTarget) and osLongRiskOK
+
+// Update OS trade counters
+if osShortSignal
+    osTradesS += 1
+if osLongSignal and not osShortSignal
+    osTradesL += 1
+
+// ==============================================================================
+// MS SIGNAL LOGIC
+// ==============================================================================
+
+// Common MS gates
+msGatesOK = useMS and ibDone and isRTH and msTradingWindow and entryAllowed and pastCooldown and strategy.position_size == 0 and msTrades < maxMSTrades
+
+// --- ONH SHORT ---
+onhInZone  = not na(onHigh) and onFrozen and high >= onHigh - msZonePts and close <= onHigh + msZonePts
+onhTarget  = msTargetBelow(close)
+onhStop    = not na(onHigh) ? onHigh + msStopBuffer : na
+onhDist    = not na(onhTarget) ? close - onhTarget : 0.0
+onhRisk    = not na(onhStop) ? onhStop - close : 0.0
+onhRiskOK  = onhDist >= msMinTargetPts and onhRisk > 0 and onhRisk <= msMaxRisk and (onhDist / onhRisk) >= msMinRR
+
+msONHSignal = msGatesOK and smaBearish and onhInZone and not ms_traded_ONH and not na(onhTarget) and onhRiskOK and not osShortSignal and not osLongSignal
+
+// --- ONL LONG ---
+onlInZone  = not na(onLow) and onFrozen and low <= onLow + msZonePts and close >= onLow - msZonePts
+onlTarget  = msTargetAbove(close)
+onlStop    = not na(onLow) ? onLow - msStopBuffer : na
+onlDist    = not na(onlTarget) ? onlTarget - close : 0.0
+onlRisk    = not na(onlStop) ? close - onlStop : 0.0
+onlRiskOK  = onlDist >= msMinTargetPts and onlRisk > 0 and onlRisk <= msMaxRisk and (onlDist / onlRisk) >= msMinRR
+
+msONLSignal = msGatesOK and smaBullish and onlInZone and not ms_traded_ONL and not na(onlTarget) and onlRiskOK and not osShortSignal and not osLongSignal and not msONHSignal
+
+// --- pVAH SHORT ---
+pvahInZone = not na(prevVAH) and high >= prevVAHVal - msZonePts and close <= prevVAHVal + msZonePts
+pvahTarget = msTargetBelow(close)
+pvahStop   = prevVAHVal + msStopBuffer
+pvahDist   = not na(pvahTarget) ? close - pvahTarget : 0.0
+pvahRisk   = pvahStop - close
+pvahRiskOK = pvahDist >= msMinTargetPts and pvahRisk > 0 and pvahRisk <= msMaxRisk and (pvahDist / pvahRisk) >= msMinRR
+
+msPVAHSignal = msGatesOK and smaBearish and pvahInZone and not ms_traded_pVAH and not na(pvahTarget) and pvahRiskOK and not osShortSignal and not osLongSignal and not msONHSignal and not msONLSignal
+
+// Update MS trade counters
+if msONHSignal
+    msTrades += 1
+    ms_traded_ONH := true
+if msONLSignal
+    msTrades += 1
+    ms_traded_ONL := true
+if msPVAHSignal
+    msTrades += 1
+    ms_traded_pVAH := true
+
+// ==============================================================================
+// AUTOMATION -- PickMyTrade JSON Builder
+// ==============================================================================
+
+pmtMsg(action, sl, tp) =>
+    p = str.tostring(close, "#.##")
+    s = str.tostring(sl, "#.##")
+    t = str.tostring(tp, "#.##")
+    acct = '"multiple_accounts":[{"token":"' + pmtToken + '","account_id":"' + pmtAccount + '","risk_percentage":0,"quantity_multiplier":1}]}'
+    head = '{"symbol":"ES1!","data":"' + action + '","quantity":"1","risk_percentage":0,"price":"' + p + '",'
+    sltp = '"tp":' + t + ',"percentage_tp":0,"dollar_tp":0,"sl":' + s + ',"dollar_sl":0,"percentage_sl":0,'
+    trail = '"trail":0,"trail_stop":0,"trail_trigger":0,"trail_freq":0,"update_tp":false,"update_sl":false,'
+    bkevn = '"breakeven":0,"breakeven_offset":0,"token":"' + pmtToken + '",'
+    flags = '"pyramid":false,"same_direction_ignore":false,"reverse_order_close":false,'
+    head + sltp + trail + bkevn + flags + acct
+
+pmtCloseMsg() =>
+    acct = '"multiple_accounts":[{"token":"' + pmtToken + '","account_id":"' + pmtAccount + '","risk_percentage":0,"quantity_multiplier":1}]}'
+    head = '{"symbol":"ES1!","data":"close","quantity":"1","risk_percentage":0,"price":"0",'
+    zeros = '"tp":0,"percentage_tp":0,"dollar_tp":0,"sl":0,"dollar_sl":0,"percentage_sl":0,'
+    trail = '"trail":0,"trail_stop":0,"trail_trigger":0,"trail_freq":0,"update_tp":false,"update_sl":false,'
+    bkevn = '"breakeven":0,"breakeven_offset":0,"token":"' + pmtToken + '",'
+    flags = '"pyramid":false,"same_direction_ignore":false,"reverse_order_close":false,'
+    head + zeros + trail + bkevn + flags + acct
+
+// ==============================================================================
+// EXECUTION
+// Priority: OS first (only fires bar 1), then MS ONH > ONL > pVAH
+// ==============================================================================
+
+// OS SHORT (gap-up fade)
+if osShortSignal
+    strategy.entry("OS_S", strategy.short, alert_message=pmtMsg("sell", osShortStop, osShortTarget))
+    strategy.exit("OS_SX", "OS_S", stop=osShortStop, limit=osShortTarget, alert_message=pmtCloseMsg())
+
+// OS LONG (gap-down fade)
+if osLongSignal and not osShortSignal
+    strategy.entry("OS_L", strategy.long, alert_message=pmtMsg("buy", osLongStop, osLongTarget))
+    strategy.exit("OS_LX", "OS_L", stop=osLongStop, limit=osLongTarget, alert_message=pmtCloseMsg())
+
+// MS ONH SHORT
+if msONHSignal
+    strategy.entry("MS_S", strategy.short, alert_message=pmtMsg("sell", onhStop, onhTarget))
+    strategy.exit("MS_SX", "MS_S", stop=onhStop, limit=onhTarget, alert_message=pmtCloseMsg())
+
+// MS ONL LONG
+if msONLSignal
+    strategy.entry("MS_L", strategy.long, alert_message=pmtMsg("buy", onlStop, onlTarget))
+    strategy.exit("MS_LX", "MS_L", stop=onlStop, limit=onlTarget, alert_message=pmtCloseMsg())
+
+// MS pVAH SHORT
+if msPVAHSignal
+    strategy.entry("MS_S", strategy.short, alert_message=pmtMsg("sell", pvahStop, pvahTarget))
+    strategy.exit("MS_SX", "MS_S", stop=pvahStop, limit=pvahTarget, alert_message=pmtCloseMsg())
+
+// Session flatten
+if etTime >= flattenTime and strategy.position_size != 0
+    strategy.close_all("RTH End", alert_message=pmtCloseMsg())
+
+// ==============================================================================
+// VISUALS
+// ==============================================================================
+
+// SMA lines
+plot(smaFast, "SMA Fast", color.new(color.lime, 0), 1)
+plot(smaSlow, "SMA Slow", color.new(color.orange, 0), 1)
+
+// IB levels (after IB completes)
+plot(ibDone ? ibHigh : na, "IB High", color.new(color.blue, 30), 2, plot.style_stepline)
+plot(ibDone ? ibLow  : na, "IB Low",  color.new(color.blue, 30), 2, plot.style_stepline)
+
+// Overnight levels (frozen at RTH open)
+onhPlot = isRTH and onFrozen and not na(onHigh) ? onHigh : na
+onlPlot = isRTH and onFrozen and not na(onLow)  ? onLow  : na
+plot(onhPlot, "ON High", color.new(color.aqua, 30), 2, plot.style_stepline)
+plot(onlPlot, "ON Low",  color.new(color.aqua, 30), 2, plot.style_stepline)
+
+// Previous day Value Area
+plot(prevVAHVal, "Prev VAH", color.new(color.red, 40), 1, plot.style_stepline)
+plot(prevVALVal, "Prev VAL", color.new(color.green, 40), 1, plot.style_stepline)
+plot(prevPOCVal, "Prev POC", color.new(color.white, 50), 1, plot.style_stepline)
+
+// Previous day close
+prevClosePlot = isRTH and not na(prevDayClose) ? prevDayClose : na
+plot(prevClosePlot, "Prev Close", color.new(color.yellow, 30), 1, plot.style_stepline)
+
+// VWAP
+plot(vwapVal, "VWAP", color.new(color.purple, 20), 2)
+
+// Entry signals
+plotshape(osShortSignal,  "OS Short",   shape.diamond,       location.abovebar, color.fuchsia, size=size.small)
+plotshape(osLongSignal and not osShortSignal, "OS Long", shape.diamond, location.belowbar, color.aqua, size=size.small)
+plotshape(msONHSignal,    "MS ONH",     shape.triangledown,  location.abovebar, color.red,     size=size.small)
+plotshape(msONLSignal,    "MS ONL",     shape.triangleup,    location.belowbar, color.green,   size=size.small)
+plotshape(msPVAHSignal,   "MS pVAH",    shape.triangledown,  location.abovebar, color.orange,  size=size.small)
+
+// Background
+bgcolor(not isRTH ? color.new(color.gray, 95) : isIBPeriod ? color.new(color.blue, 95) : na)
+
+// ==============================================================================
+// DASHBOARD (20 rows)
+// ==============================================================================
+
+var table t = table.new(position.top_right, 2, 20, color.new(color.black, 75))
+if barstate.islast
+    // Row 0: Header
+    table.cell(t, 0, 0, "MS+OS Best", text_color=color.black, bgcolor=color.lime)
+    table.cell(t, 1, 0, "", bgcolor=color.lime)
+
+    // Row 1: SMA state
+    table.cell(t, 0, 1, "SMA 8/24", text_color=color.white)
+    table.cell(t, 1, 1, smaBullish ? "BULL" : "BEAR", text_color=smaBullish ? color.green : color.red)
+
+    // Row 2: Gap size
+    table.cell(t, 0, 2, "Gap", text_color=color.white)
+    gapText = str.tostring(gapSize, "#.#") + "pt"
+    gapColor = math.abs(gapSize) >= osMinGap and math.abs(gapSize) <= osMaxGap ? color.yellow : color.gray
+    table.cell(t, 1, 2, gapText, text_color=gapColor)
+
+    // Row 3: ON Sweep
+    table.cell(t, 0, 3, "ON Sweep", text_color=color.white)
+    sweepText = gapSize >= osMinGap ? (onSweptAbove ? "YES" : "NO") : gapSize <= -osMinGap ? (onSweptBelow ? "YES" : "NO") : "N/A"
+    sweepColor = (onSweptAbove and gapSize >= osMinGap) or (onSweptBelow and gapSize <= -osMinGap) ? color.green : color.red
+    table.cell(t, 1, 3, sweepText, text_color=sweepColor)
+
+    // Row 4: OS Status
+    table.cell(t, 0, 4, "OS Status", text_color=color.white)
+    osStatusText = not useOS ? "OFF" : (osTradesS + osTradesL) >= maxOSTrades ? "DONE" : rthBarCount > osEntryWindow ? "WINDOW CLOSED" : not (osGapUpValid or osGapDnValid) ? "NO GAP" : "ARMED"
+    osStatusColor = not useOS ? color.gray : osStatusText == "ARMED" ? color.lime : osStatusText == "DONE" ? color.aqua : color.orange
+    table.cell(t, 1, 4, osStatusText, text_color=osStatusColor)
+
+    // Row 5: ON High
+    table.cell(t, 0, 5, "ON High", text_color=color.white)
+    table.cell(t, 1, 5, onFrozen and not na(onHigh) ? str.tostring(onHigh, "#.##") : "---", text_color=color.aqua)
+
+    // Row 6: ON Low
+    table.cell(t, 0, 6, "ON Low", text_color=color.white)
+    table.cell(t, 1, 6, onFrozen and not na(onLow) ? str.tostring(onLow, "#.##") : "---", text_color=color.aqua)
+
+    // Row 7: pVAH
+    table.cell(t, 0, 7, "pVAH", text_color=color.white)
+    table.cell(t, 1, 7, str.tostring(prevVAHVal, "#.##"), text_color=color.red)
+
+    // Row 8: pPOC
+    table.cell(t, 0, 8, "pPOC", text_color=color.white)
+    table.cell(t, 1, 8, str.tostring(prevPOCVal, "#.##"), text_color=color.white)
+
+    // Row 9: pVAL
+    table.cell(t, 0, 9, "pVAL", text_color=color.white)
+    table.cell(t, 1, 9, str.tostring(prevVALVal, "#.##"), text_color=color.green)
+
+    // Row 10: Prev Close
+    table.cell(t, 0, 10, "Prev Close", text_color=color.white)
+    table.cell(t, 1, 10, not na(prevDayClose) ? str.tostring(prevDayClose, "#.##") : "---", text_color=color.yellow)
+
+    // Row 11: VWAP
+    table.cell(t, 0, 11, "VWAP", text_color=color.white)
+    table.cell(t, 1, 11, str.tostring(vwapVal, "#.##"), text_color=color.purple)
+
+    // Row 12: Session
+    table.cell(t, 0, 12, "Session", text_color=color.white)
+    sessText = isIBPeriod ? "IB" : msTradingWindow ? "ACTIVE" : isRTH ? "RTH" : "CLOSED"
+    sessColor = msTradingWindow ? color.green : isIBPeriod ? color.yellow : isRTH ? color.white : color.gray
+    table.cell(t, 1, 12, sessText, text_color=sessColor)
+
+    // Row 13: Filters
+    table.cell(t, 0, 13, "Filters", text_color=color.white)
+    filterText = skipFriday and isFriday ? "FRI-OFF" : "CLEAR"
+    filterColor = entryAllowed ? color.green : color.red
+    table.cell(t, 1, 13, filterText, text_color=filterColor)
+
+    // Row 14: Cooldown
+    table.cell(t, 0, 14, "Cooldown", text_color=color.white)
+    table.cell(t, 1, 14, str.tostring(barsSinceExit) + "/" + str.tostring(cooldownBars), text_color=pastCooldown ? color.green : color.red)
+
+    // Row 15: MS Levels traded
+    table.cell(t, 0, 15, "MS Levels", text_color=color.white)
+    msLvlText = ""
+    if ms_traded_ONH
+        msLvlText += "ONH "
+    if ms_traded_ONL
+        msLvlText += "ONL "
+    if ms_traded_pVAH
+        msLvlText += "pVAH"
+    if msLvlText == ""
+        msLvlText := "NONE TRADED"
+    table.cell(t, 1, 15, msLvlText, text_color=ms_traded_ONH or ms_traded_ONL or ms_traded_pVAH ? color.aqua : color.gray)
+
+    // Row 16: OS Trades
+    table.cell(t, 0, 16, "OS Trades", text_color=color.white)
+    table.cell(t, 1, 16, str.tostring(osTradesS + osTradesL) + "/" + str.tostring(maxOSTrades), text_color=color.aqua)
+
+    // Row 17: MS Trades
+    table.cell(t, 0, 17, "MS Trades", text_color=color.white)
+    table.cell(t, 1, 17, str.tostring(msTrades) + "/" + str.tostring(maxMSTrades), text_color=color.aqua)
+
+    // Row 18: Capital
+    table.cell(t, 0, 18, "Capital", text_color=color.white)
+    table.cell(t, 1, 18, "$" + str.tostring(strategy.equity, "#,###"), text_color=strategy.equity >= 100000 ? color.green : color.red)
+
+    // Row 19: Position
+    table.cell(t, 0, 19, "Position", text_color=color.white)
+    posText = strategy.position_size > 0 ? "LONG" : strategy.position_size < 0 ? "SHORT" : "FLAT"
+    posColor = strategy.position_size > 0 ? color.green : strategy.position_size < 0 ? color.red : color.gray
+    table.cell(t, 1, 19, posText, text_color=posColor)

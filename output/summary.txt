@@ -2,24 +2,24 @@
   AMT-TEMA Backtest Report — ES
 ============================================================
 
-  Net P&L:          $-9,903.38
-  Total Trades:     42
-  Win Rate:         35.7%
-  Profit Factor:    0.513
-  Max Drawdown:     $10,353.38 (10.3%)
-  Avg Win:          $694.85
-  Avg Loss:         $-752.82
-  Avg Trade:        $-235.79
-  Sharpe:           -4.47
-  Calmar:           -4.92
-  Trades/Day:       0.59
-  Win Streak:       2
-  Lose Streak:      6
+  Net P&L:          $-261,081.73
+  Total Trades:     285
+  Win Rate:         40.7%
+  Profit Factor:    0.310
+  Max Drawdown:     $279,048.81 (260.9%)
+  Avg Win:          $1,011.38
+  Avg Loss:         $-2,239.07
+  Avg Trade:        $-916.08
+  Sharpe:           -0.89
+  Calmar:           -0.47
+  Trades/Day:       0.40
+  Win Streak:       6
+  Lose Streak:      10
 
 ------------------------------------------------------------
   Per-Setup Breakdown
 ------------------------------------------------------------
-  IB      |   32 trades  |  WR  37.5%  |  PF 0.625  |  P&L $-5,441.25
-  VA      |   10 trades  |  WR  30.0%  |  PF 0.232  |  P&L $-4,462.13
+  IB      |  250 trades  |  WR  41.6%  |  PF 1.193  |  P&L $+17,823.08
+  VA      |   35 trades  |  WR  34.3%  |  PF 0.025  |  P&L $-278,904.81
 
 ============================================================
