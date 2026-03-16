@@ -26,8 +26,8 @@ def _make_bar(et_time, high, low, close, volume=1000, open_=None, is_new_rth=Fal
         "et_hour": et_hour,
         "et_minute": et_minute,
         "is_rth": 930 <= et_time < 1600,
-        "is_ib_period": 930 <= et_time < 1030,
-        "is_trading_window": 1035 <= et_time < 1500,
+        "is_ib_period": 930 <= et_time < 1000,
+        "is_trading_window": 1005 <= et_time < 1500,
         "new_rth": is_new_rth,
         "vol_ratio": 1.0,
     }
@@ -60,15 +60,15 @@ class TestIBTracking:
         update_session(state, bar1, None, cfg)
 
         # Last IB bar
-        bar2 = _make_bar(1025, 5015, 4995, 5005)
+        bar2 = _make_bar(955, 5015, 4995, 5005)
         update_session(state, bar2, bar1, cfg)
         assert not state.ib_done
 
         # First post-IB bar
-        bar3 = _make_bar(1030, 5012, 4998, 5008)
+        bar3 = _make_bar(1000, 5012, 4998, 5008)
         # This is RTH but not IB period, so should NOT set ib_done
-        # Because is_ib_period check is et_time >= 930 and et_time < 1030
-        # 1030 is NOT in IB period
+        # Because is_ib_period check is et_time >= 930 and et_time < 1000
+        # 1000 is NOT in IB period
         update_session(state, bar3, bar2, cfg)
         assert state.ib_done
 

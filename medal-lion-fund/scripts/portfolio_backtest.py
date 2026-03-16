@@ -330,8 +330,15 @@ def run_ema_cross_dir(regime_filter=None):
     vix_path = SPX_OPTIONS_ROOT / "data" / "vix_daily.parquet"
     vix = load_vix_data(str(vix_path)) if vix_path.exists() else None
 
+    # Load all-sessions data for overnight inventory filter
+    df_all_path = SPX_OPTIONS_ROOT / "data" / "spy_1m_all.parquet"
+    df_all = None
+    if df_all_path.exists():
+        df_all = load_spy_data(str(df_all_path))
+        df_all = tag_sessions(df_all)
+
     strategy = EMACrossDirectionalBest()
-    trades = strategy.run_backtest(df, vix_data=vix)
+    trades = strategy.run_backtest(df, vix_data=vix, df_all_sessions=df_all)
     return trades, regime_filter
 
 

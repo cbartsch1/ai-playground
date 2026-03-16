@@ -23,8 +23,8 @@ class StrategyConfig:
     # --- Session (ET times as HHMM integers) ---
     rth_start: int = 930
     rth_end: int = 1600
-    ib_end_time: int = 1030
-    trade_start: int = 1035
+    ib_end_time: int = 1030      # 60-min IB (9:30-10:30 ET)
+    trade_start: int = 1035      # First entry 5 min after IB
     trade_end: int = 1500
     flatten_time: int = 1555
 

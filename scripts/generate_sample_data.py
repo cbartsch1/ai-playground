@@ -71,7 +71,7 @@ def generate_es_5m_data(days=15, start_price=5950.0):
         rth_open = price
         ib_drift = 0
 
-        # IB period (9:30-10:30): set IB range
+        # IB period (9:30-10:00): set IB range (standard 30-min ORB)
         if day_type == "trend_up":
             ib_target_range = random.uniform(10, 25)  # Narrowish IB for trend
             ib_drift = ib_target_range * 0.3
@@ -82,7 +82,7 @@ def generate_es_5m_data(days=15, start_price=5950.0):
             ib_target_range = random.uniform(12, 35)  # Wider IB for rotational
             ib_drift = 0
 
-        ib_bars = 12  # 60 min / 5 min
+        ib_bars = 6  # 30 min / 5 min (standard ORB)
         ib_high = price
         ib_low = price
 
@@ -114,11 +114,11 @@ def generate_es_5m_data(days=15, start_price=5950.0):
                 "Volume": vol
             })
 
-        # Post-IB: 10:30-16:00
-        post_ib_bars = 66  # 330 min / 5 min
+        # Post-IB: 10:00-16:00
+        post_ib_bars = 72  # 360 min / 5 min
 
         for bar_idx in range(post_ib_bars):
-            total_min = 630 + bar_idx * 5  # 630 = 10:30
+            total_min = 600 + bar_idx * 5  # 600 = 10:00
             hour = total_min // 60
             minute = total_min % 60
 

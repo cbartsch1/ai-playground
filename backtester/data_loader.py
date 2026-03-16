@@ -105,7 +105,11 @@ def tag_sessions(df: pd.DataFrame,
                  ib_end: int = 1030,
                  trade_start: int = 1035,
                  trade_end: int = 1500) -> None:
-    """Add session boolean columns in-place."""
+    """Add session boolean columns in-place.
+
+    ib_end=1030: Standard 60-minute Initial Balance (9:30-10:30 ET).
+    trade_start=1035: First entries 5 min after IB forms.
+    """
     et = df["et_time"]
 
     df["is_rth"] = (et >= rth_start) & (et < rth_end)
