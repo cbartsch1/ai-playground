@@ -79,6 +79,11 @@ def check_signal(bar: dict, prev_bar, session, cfg) -> Optional[dict]:
     if not bar["is_trading_window"]:
         return None
 
+    # Afternoon filter: no new entries at 14:00+ ET (afternoon chop)
+    et_time = bar.get("et_time", 0)
+    if et_time >= 1400:
+        return None
+
     if session.bars_since_exit < cfg.cooldown_bars:
         return None
 
