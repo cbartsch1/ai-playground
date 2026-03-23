@@ -110,6 +110,11 @@ def check_signal(bar: dict, prev_bar, session, cfg) -> Optional[dict]:
     if session.ib_trades_s >= cfg.max_ib_trades:
         return None
 
+    # AMT context: skip when day opened BELOW previous value area
+    # Below-VA opens = discount territory = potential support = higher rejection risk
+    if session.open_below_va:
+        return None
+
     # Stop: IB mid capped by pct stop
     max_stop = (bar["close"] * cfg.pct_stop_bps / 10000.0
                 if cfg.pct_stop_mode else cfg.ib_max_stop_pts)
