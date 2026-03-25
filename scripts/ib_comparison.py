@@ -5,7 +5,7 @@ Runs AMT-TEMA v8, Nexus (MS+OS), and Sentinel (LVL v13) with both
 60-min IB (12 bars, original) and 30-min IB (6 bars, corrected).
 
 Usage:
-    cd ~/projects/ai-playground
+    cd ~/projects/backtesting/es
     .venv/bin/python scripts/ib_comparison.py
 """
 import sys, os

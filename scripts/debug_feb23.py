@@ -9,7 +9,7 @@ Feb 23, 2026 is NOT in the data. This script:
   3. Picks a sample day and walks through the full REJ signal check
 
 Usage:
-    cd /Users/chuck_mf_norris/projects/ai-playground
+    cd /Users/chuck_mf_norris/projects/backtesting/es
     python scripts/debug_feb23.py data/es_5m_databento_2yr.csv
 """
 
@@ -18,7 +18,7 @@ import math
 import pandas as pd
 
 # Add project root to path
-sys.path.insert(0, "/Users/chuck_mf_norris/projects/ai-playground")
+sys.path.insert(0, "/Users/chuck_mf_norris/projects/backtesting/es")
 
 from backtester.config import StrategyConfig
 from backtester.data_loader import load_tos_csv

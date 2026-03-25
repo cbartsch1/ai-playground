@@ -10,7 +10,7 @@ Compares multiple configurations on the full 2yr dataset:
 4. Simulated "split Friday" configs
 
 Usage:
-    cd /Users/chuck_mf_norris/projects/ai-playground
+    cd /Users/chuck_mf_norris/projects/backtesting/es
     .venv/bin/python scripts/test_rej_friday.py data/es_5m_databento_2yr.csv
 """
 
