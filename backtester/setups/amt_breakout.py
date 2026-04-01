@@ -79,11 +79,6 @@ def check_signal(bar: dict, prev_bar, session, cfg) -> Optional[dict]:
     if not bar["is_trading_window"]:
         return None
 
-    # Afternoon filter: no new entries at 14:00+ ET (afternoon chop)
-    et_time = bar.get("et_time", 0)
-    if et_time >= 1400:
-        return None
-
     if session.bars_since_exit < cfg.cooldown_bars:
         return None
 
@@ -113,11 +108,6 @@ def check_signal(bar: dict, prev_bar, session, cfg) -> Optional[dict]:
 
     # Max IB trades per day
     if session.ib_trades_s >= cfg.max_ib_trades:
-        return None
-
-    # AMT context: skip when day opened BELOW previous value area
-    # Below-VA opens = discount territory = potential support = higher rejection risk
-    if session.open_below_va:
         return None
 
     # Stop: IB mid capped by pct stop
