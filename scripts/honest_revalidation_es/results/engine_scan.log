@@ -1,0 +1,3 @@
+[engine] 630 engine runs on 10 workers...
+/opt/homebrew/Cellar/python@3.14/3.14.3_1/Frameworks/Python.framework/Versions/3.14/lib/python3.14/multiprocessing/resource_tracker.py:396: UserWarning: resource_tracker: There appear to be 6 leaked semaphore objects to clean up at shutdown: {'/mp-n_joj96e', '/mp-m8p54xgp', '/mp-omzk024n', '/mp-b267glbp', '/mp-3q7yfqt6', '/mp-cvjvauaj'}
+  warnings.warn(
