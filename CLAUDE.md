@@ -46,8 +46,8 @@ Multi-AI workflow project for ES/NQ futures scalping strategies in Pine Script v
   - All inputs optimizable, lookahead_off, Pine Script v6, designed for ES 5m chart
   - **NEEDS BACKTESTING** — not yet validated on 2yr data
 - `amt-tema-strategy.pine` — **AMT-TEMA v8** — Proven baseline (short-only, 30bps pct stop)
-  - 177 trades, PF 1.511, +$30,084, 45.2% WR, $5.1K DD, Sharpe 2.65
-  - p=0.028 (t-test), p=0.013 (permutation) — STATISTICALLY SIGNIFICANT
+  - 183 trades, PF 1.430, p=0.047 (t-test) — restored baseline (commit ed86b73, Apr 1 2026: two unreverted AR experiment filters removed)
+  - The 177t / PF 1.511 / p=0.028 figures below in Version History are the original Feb 2026 measurement; current committed code reproduces 183t / PF 1.430 / p=0.047
   - **Automation**: PickMyTrade webhook integration (Automation input group: token + account ID)
   - `pmtMsg()` / `pmtCloseMsg()` build full PMT JSON with SL/TP as absolute prices
   - `alert_message` on all `strategy.entry()` and `strategy.close_all()` calls
