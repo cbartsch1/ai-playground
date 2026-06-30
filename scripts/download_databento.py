@@ -13,11 +13,16 @@ Usage:
 """
 
 import argparse
+import os
+import sys
+
 import databento as db
 import pandas as pd
 
 
-API_KEY = "db-QdAyrLRKET6vyi9mecsxU8T9MqQ6d"
+API_KEY = os.environ.get("DATABENTO_API_KEY")
+if not API_KEY:
+    sys.exit("DATABENTO_API_KEY not set in environment (source ~/.databento.env)")
 
 
 def main():

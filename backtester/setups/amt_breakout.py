@@ -38,7 +38,7 @@ def get_config() -> StrategyConfig:
     cfg.use_va_fade = False
 
     # IB breakout settings
-    cfg.use_ib_break = True
+    cfg.use_ib_break = False
     cfg.tp_atr_mult = 0.0   # v8 mode: use IB range as TP, not ATR cap
     cfg.max_ib_trades = 2
     cfg.min_ib_range = 8.0

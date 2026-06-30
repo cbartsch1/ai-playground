@@ -1,0 +1,7 @@
+
+# bytecode (was erroneously tracked — removed 2026-06-30 hygiene)
+__pycache__/
+*.pyc
+*.backup
+run.log
+results.tsv

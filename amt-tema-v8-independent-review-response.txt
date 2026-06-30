@@ -133,7 +133,7 @@ period-specific.
 The review raises legitimate points that are worth addressing:
 
 REGIME GATING: The strategy should not trade in all conditions. We
-agree, and we already have this. Our Medallion 2.0 regime model
+agree, and we already have this. Our regime model
 (7-state HMM, OOS validated p=0.0003) blocks trades during Crash,
 Bull Run, and Strong Bull regimes. With the filter applied:
 
@@ -198,7 +198,7 @@ trades survive, and what's the PF on the filtered set?
                               data. "Partially in-sample" is factually
                               incorrect.
 
-  Regime gating:              Already implemented via Medallion 2.0.
+  Regime gating:              Already implemented via the regime model.
                               Strategy is not designed to trade in all
                               conditions and should not be evaluated
                               as if it is.

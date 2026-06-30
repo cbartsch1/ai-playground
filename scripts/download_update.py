@@ -16,7 +16,9 @@ import databento as db
 import pandas as pd
 
 
-API_KEY = "db-QdAyrLRKET6vyi9mecsxU8T9MqQ6d"
+API_KEY = os.environ.get("DATABENTO_API_KEY")
+if not API_KEY:
+    sys.exit("DATABENTO_API_KEY not set in environment (source ~/.databento.env)")
 CSV_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
     "data", "es_5m_databento_2yr.csv"

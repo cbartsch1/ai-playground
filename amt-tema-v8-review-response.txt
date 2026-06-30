@@ -145,7 +145,7 @@ from v1 through v8 shows each decision and its data.
 OPORD Fit — Regime Integration
 -------------------------------
 The review mentions needing a regime tag. We have this via our
-Medallion 2.0 regime model (7-state HMM, 13-confirmation system,
+regime model (7-state HMM, 13-confirmation system,
 OOS validated p=0.0003).
 
 AMT-TEMA v8 with regime filter (blocks Bull Run + Strong Bull):
