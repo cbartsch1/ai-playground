@@ -1,0 +1,27 @@
+{
+  "showMessageTimestamps": true,
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/timestamp.sh prompt",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/timestamp.sh response",
+            "timeout": 5
+          }
+        ]
+      }
+    ]
+  }
+}

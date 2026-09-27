@@ -30,6 +30,7 @@ This is a multi-AI workflow test project where Claude Code, Gemini CLI, and Grok
 ## Guidelines
 - All AI tools share this context
 - Coordinate work to avoid conflicts
+- **Timestamps**: Begin every response with `🕒 YYYY-MM-DD HH:MM:SS TZ` (US/Eastern). Claude Code sessions get the exact time from the hook in `.claude/settings.json`; other tools use the current system time.
 - When modifying Pine Script strategies, always use `lookahead=barmerge.lookahead_off` in `request.security()` calls
 - All strategy inputs should include `minval/maxval/step` for optimization
 - Target instruments: ES (E-mini S&P 500), NQ (E-mini Nasdaq) futures
